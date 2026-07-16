@@ -24,6 +24,31 @@ macos-titlebar-style = tabs
 macos-option-as-alt = true
 window-save-state = always
 
+# ── Keybinds: tmux via ⌘ (the shell never sees cmd) ──────────────────
+# text: sends raw bytes; \x01 is C-a (the tmux prefix), trailing keys
+# are literal lowercase characters. These override Ghostty's own
+# tab/split defaults on the same chords — tmux owns multiplexing.
+# Caveat: outside tmux these inject a bare C-a (harmless: readline
+# beginning-of-line). physical: matches Ghostty's default digit
+# triggers so cmd+1..9 replace goto_tab (new in Ghostty 1.2).
+keybind = cmd+a=text:\x01
+keybind = cmd+t=text:\x01c
+keybind = cmd+d=text:\x01|
+keybind = cmd+shift+d=text:\x01-
+keybind = cmd+shift+left_bracket=text:\x01p
+keybind = cmd+shift+right_bracket=text:\x01n
+keybind = cmd+physical:one=text:\x011
+keybind = cmd+physical:two=text:\x012
+keybind = cmd+physical:three=text:\x013
+keybind = cmd+physical:four=text:\x014
+keybind = cmd+physical:five=text:\x015
+keybind = cmd+physical:six=text:\x016
+keybind = cmd+physical:seven=text:\x017
+keybind = cmd+physical:eight=text:\x018
+keybind = cmd+physical:nine=text:\x019
+# cmd+w keeps its default (close surface, with confirm) — kill panes
+# from inside tmux with prefix x instead.
+
 # ── Behavior ─────────────────────────────────────────────────────────
 # Ghostty auto-detects fish and injects shell integration.
 shell-integration = detect
