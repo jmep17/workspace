@@ -39,7 +39,7 @@ return {
     { "<leader>sk", function() Snacks.picker.keymaps() end, desc = "Keymaps" },
     { "<leader>sr", function() Snacks.picker.resume() end, desc = "Resume last picker" },
     { "<leader>su", function() Snacks.picker.undo() end, desc = "Undo history" },
-    { "<leader>sn", function() Snacks.picker.notifications() end, desc = "Notification history" },
+    { "<leader>n", function() Snacks.picker.notifications() end, desc = "Notification history" },
     { '<leader>s"', function() Snacks.picker.registers() end, desc = "Registers" },
     -- git
     { "<leader>gg", function() Snacks.lazygit() end, desc = "Lazygit" },
