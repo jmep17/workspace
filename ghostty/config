@@ -1,0 +1,39 @@
+# Ghostty config — hand-rolled, everything explicit.
+# Bootstrap: ln -s ~/src/workspace/ghostty ~/.config/ghostty
+# Reload with cmd+shift+, — no restart needed for most keys.
+# Docs: ghostty +show-config --default --docs
+
+# ── Theme & appearance ───────────────────────────────────────────────
+# GruvboxDark matches the nvim default; follows the OS light/dark switch.
+theme = dark:GruvboxDark,light:GruvboxLight
+
+# Nerd Font per the nvim requirements (icons in lualine/oil/snacks).
+font-family = JetBrainsMono Nerd Font
+font-size = 13
+
+cursor-style = block
+cursor-style-blink = false
+
+window-padding-x = 6
+window-padding-y = 4
+window-padding-balance = true
+unfocused-split-opacity = 0.85
+
+# ── macOS ────────────────────────────────────────────────────────────
+macos-titlebar-style = tabs
+macos-option-as-alt = true
+window-save-state = always
+
+# ── Behavior ─────────────────────────────────────────────────────────
+# Ghostty auto-detects fish and injects shell integration.
+shell-integration = detect
+shell-integration-features = cursor,sudo,title
+
+copy-on-select = clipboard
+clipboard-paste-protection = true
+mouse-hide-while-typing = true
+
+# tmux owns splits/tabs inside sessions, so surface-level confirms stay on
+# only for running commands.
+confirm-close-surface = true
+quit-after-last-window-closed = false
