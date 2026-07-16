@@ -64,6 +64,7 @@ return {
         { "<leader>g", group = "git" },
         { "<leader>gh", group = "hunks" },
         { "<leader>s", group = "search" },
+        { "<leader>sn", group = "noice" },
         { "<leader>t", group = "test" },
         { "<leader>u", group = "ui/toggles" },
         { "<leader>x", group = "lists" },
