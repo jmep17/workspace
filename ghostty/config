@@ -31,6 +31,10 @@ window-save-state = always
 # Caveat: outside tmux these inject a bare C-a (harmless: readline
 # beginning-of-line). physical: matches Ghostty's default digit
 # triggers so cmd+1..9 replace goto_tab (new in Ghostty 1.2).
+# First-launch check: if cmd+1..9 still switch Ghostty tabs instead of
+# tmux windows, the override didn't take on this Ghostty version — add
+# `keybind = cmd+physical:one=unbind` (…through nine) above these to
+# clear the defaults explicitly.
 keybind = cmd+a=text:\x01
 keybind = cmd+t=text:\x01c
 keybind = cmd+d=text:\x01|
