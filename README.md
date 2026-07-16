@@ -48,6 +48,15 @@ Remap **Caps Lock → Control**: System Settings → Keyboard →
 Keyboard Shortcuts… → Modifier Keys. This makes the tmux prefix a
 home-row roll (Caps+A) with no third-party tools.
 
+### 4. First-launch check (Ghostty)
+
+Inside tmux, press `⌘1` — it should select tmux window 1, not a Ghostty
+tab. Ghostty 1.2 ships `cmd+1..9 = goto_tab` defaults; our config
+overrides them with the same `physical:` digit triggers, but if a digit
+chord still switches Ghostty tabs on your version, add explicit
+`keybind = cmd+physical:one=unbind` lines (one through nine) above the
+digit bindings in `ghostty/config`, then reload with `cmd+shift+,`.
+
 ## Keybinding model
 
 Three layers, each owning what it's best at:
