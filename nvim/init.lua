@@ -1,0 +1,5 @@
+require("config.options")
+require("config.lazy")
+require("config.theme").setup("gruvbox")
+require("config.keymaps")
+require("config.autocmds")
