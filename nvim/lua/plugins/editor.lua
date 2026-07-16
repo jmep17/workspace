@@ -25,11 +25,16 @@ return {
 
   -- Jump anywhere with s/S
   {
-    "ggandor/leap.nvim",
+    -- moved from github ggandor/leap.nvim (notice in that repo's README)
+    url = "https://codeberg.org/andyg/leap.nvim",
+    name = "leap.nvim",
     event = "VeryLazy",
     dependencies = { "tpope/vim-repeat" },
     config = function()
-      require("leap").create_default_mappings()
+      -- explicit s/S only — create_default_mappings() also claims gs,
+      -- which collides with the mini.surround gs* prefix and oil's gs
+      vim.keymap.set({ "n", "x", "o" }, "s", "<Plug>(leap-forward)", { desc = "Leap forward" })
+      vim.keymap.set({ "n", "x", "o" }, "S", "<Plug>(leap-backward)", { desc = "Leap backward" })
     end,
   },
 }
