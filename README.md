@@ -102,7 +102,7 @@ per-type `work` folders migrate into `work/` automatically at startup.
 Skills can be organized into nested folders ("groups"): any directory under
 `skills/` without its own `SKILL.md` — e.g. `skills/work/`, `skills/ai/`.
 Claude Code only discovers **direct children** of the skills dir, so nesting
-alone would hide a skill; skills-ui bridges this by auto-maintaining a
+alone would hide a skill; claude-ui bridges this by auto-maintaining a
 top-level `<group>-<name>` symlink for every group member (created and
 pruned on each page load). The skill's name as Claude Code sees it is the
 link name, e.g. `skills/ai/prompter/` loads as `ai-prompter`. Commit both
@@ -116,8 +116,8 @@ symlinks alone.
 
 ### claude-ui
 
-`bin/claude-ui` (Python stdlib, no deps; `bin/skills-ui` still works as an
-alias) serves a local gruvbox-styled page at `http://127.0.0.1:7333` with a
+`bin/claude-ui` (Python stdlib, no deps) serves a local gruvbox-styled page
+at `http://127.0.0.1:7333` with a
 tab per config type. Every type supports archive/restore (to `archive/`,
 which Claude Code doesn't scan), delete, move into nested folders, upload
 from disk via the browser's folder picker, scaffolding, and filtering.
