@@ -8,6 +8,7 @@ each symlinked into `~/.config`. Domain language lives in
 nvim/      Neovim config (see nvim/README.md for details)
 tmux/      tmux.conf — C-a prefix, vi copy mode, gruvbox status line
 ghostty/   Ghostty config — gruvbox theme, ⌘-key tmux bindings
+skills/    Claude Code skills, symlinked as ~/.claude/skills
 ```
 
 ## Fresh machine setup
@@ -31,6 +32,7 @@ git clone git@github.com:jmep17/workspace.git ~/src/workspace
 ln -s ~/src/workspace/nvim ~/.config/nvim
 ln -s ~/src/workspace/tmux ~/.config/tmux
 ln -s ~/src/workspace/ghostty ~/.config/ghostty
+ln -s ~/src/workspace/skills ~/.claude/skills
 ```
 
 If a config directory already exists (a work machine may ship defaults),
@@ -43,6 +45,9 @@ move it aside first: `mv ~/.config/nvim ~/.config/nvim.bak`.
 - **Ghostty** reads `~/.config/ghostty/config` — reload with `cmd+shift+,`.
   Every window auto-attaches to the tmux session `main` (`command =` uses
   the Apple Silicon brew path; switch to `/usr/local/bin/tmux` on Intel).
+- **Claude Code** reads `~/.claude/skills` — the symlink makes every skill
+  in `skills/` available user-level, in every project on the machine. See
+  [Claude Code skills](#claude-code-skills) for adding machine-local skills.
 
 ### 3. macOS settings (one-time, per machine)
 
@@ -58,6 +63,26 @@ overrides them with the same `physical:` digit triggers, but if a digit
 chord still switches Ghostty tabs on your version, add explicit
 `keybind = cmd+physical:one=unbind` lines (one through nine) above the
 digit bindings in `ghostty/config`, then reload with `cmd+shift+,`.
+
+## Claude Code skills
+
+`skills/` holds one directory per skill (each with a `SKILL.md`). With the
+`~/.claude/skills` symlink from setup step 2, Claude Code discovers them as
+user-level skills everywhere on the machine, and a `git pull` updates them
+in place.
+
+Machine-local skills (e.g. work-specific ones that must not be committed
+here) live elsewhere and are symlinked in under a `work-` prefix, which
+`.gitignore` excludes:
+
+```fish
+# skill content lives outside this repo, e.g. ~/work-skills/deploy-checklist
+ln -s ~/work-skills/deploy-checklist ~/src/workspace/skills/work-deploy-checklist
+```
+
+Claude Code follows nested symlinks, so the skill loads like any other while
+its content stays out of this repo — keep `~/work-skills` in its own
+(private) repo if it should be versioned and backed up.
 
 ## Keybinding model
 
