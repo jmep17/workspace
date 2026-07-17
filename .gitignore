@@ -2,3 +2,4 @@
 
 # Machine-local skills (e.g. work-specific) live in skills/ but stay uncommitted
 skills/work-*/
+archive/work-*/
