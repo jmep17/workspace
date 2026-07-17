@@ -4,8 +4,9 @@
 # Docs: ghostty +show-config --default --docs
 
 # ── Theme & appearance ───────────────────────────────────────────────
-# GruvboxDark matches the nvim default; follows the OS light/dark switch.
-theme = dark:GruvboxDark,light:GruvboxLight
+# Gruvbox matches the nvim default; follows the OS light/dark switch.
+# Names are space-separated since Ghostty 1.2 (verify: ghostty +list-themes).
+theme = dark:Gruvbox Dark,light:Gruvbox Light
 
 # Nerd Font per the nvim requirements (icons in lualine/oil/snacks).
 font-family = JetBrainsMono Nerd Font
