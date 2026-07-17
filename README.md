@@ -8,9 +8,12 @@ each symlinked into `~/.config`. Domain language lives in
 nvim/      Neovim config (see nvim/README.md for details)
 tmux/      tmux.conf — C-a prefix, vi copy mode, gruvbox status line
 ghostty/   Ghostty config — gruvbox theme, ⌘-key tmux bindings
-skills/    Claude Code skills, symlinked as ~/.claude/skills
-archive/   Retired skills — kept in git, not loaded by Claude Code
-bin/       skills-ui — local web UI for managing skills
+skills/    Claude Code skills      → linked as <config dir>/skills
+commands/  Claude Code commands    → linked as <config dir>/commands
+agents/    Claude Code subagents   → linked as <config dir>/agents
+claude/    CLAUDE.md, settings.json, keybindings.json → linked as files
+archive/   Retired skills/commands/agents — in git, not loaded
+bin/       claude-ui — local web UI managing all of the above
 ```
 
 ## Fresh machine setup
@@ -34,7 +37,7 @@ git clone git@github.com:jmep17/workspace.git ~/src/workspace
 ln -s ~/src/workspace/nvim ~/.config/nvim
 ln -s ~/src/workspace/tmux ~/.config/tmux
 ln -s ~/src/workspace/ghostty ~/.config/ghostty
-ln -s ~/src/workspace/skills ~/.claude/skills
+bin/claude-ui   # then click "link" on each Claude config mapping
 ```
 
 If a config directory already exists (a work machine may ship defaults),
@@ -47,9 +50,10 @@ move it aside first: `mv ~/.config/nvim ~/.config/nvim.bak`.
 - **Ghostty** reads `~/.config/ghostty/config` — reload with `cmd+shift+,`.
   Every window auto-attaches to the tmux session `main` (`command =` uses
   the Apple Silicon brew path; switch to `/usr/local/bin/tmux` on Intel).
-- **Claude Code** reads `~/.claude/skills` — the symlink makes every skill
-  in `skills/` available user-level, in every project on the machine. See
-  [Claude Code skills](#claude-code-skills) for adding machine-local skills.
+- **Claude Code** reads its config dir (`~/.claude`, or `$CLAUDE_CONFIG_DIR`
+  if exported) — claude-ui's links panel symlinks `skills`, `commands`,
+  `agents`, `CLAUDE.md`, `settings.json`, and `keybindings.json` into it.
+  See [Claude Code config](#claude-code-config).
 
 ### 3. macOS settings (one-time, per machine)
 
@@ -66,12 +70,14 @@ chord still switches Ghostty tabs on your version, add explicit
 `keybind = cmd+physical:one=unbind` lines (one through nine) above the
 digit bindings in `ghostty/config`, then reload with `cmd+shift+,`.
 
-## Claude Code skills
+## Claude Code config
 
-`skills/` holds one directory per skill (each with a `SKILL.md`). With the
-`~/.claude/skills` symlink from setup step 2, Claude Code discovers them as
-user-level skills everywhere on the machine, and a `git pull` updates them
-in place.
+All user-level Claude Code config is versioned here and symlinked into the
+config dir: `skills/` (one directory per skill, each with a `SKILL.md`),
+`commands/` (one `.md` per slash command; subdirs namespace natively, so
+`commands/git/pr.md` is `/git:pr`), `agents/` (one `.md` per subagent), and
+`claude/` (`CLAUDE.md`, `settings.json`, `keybindings.json`, linked as
+individual files). A `git pull` updates everything in place.
 
 ### Groups (nested folders)
 
@@ -90,26 +96,30 @@ never committed. External skills can also be symlinked in by hand
 (`ln -s ~/elsewhere/skill skills/work-name`); the manager leaves foreign
 symlinks alone.
 
-### skills-ui
+### claude-ui
 
-`bin/skills-ui` (Python stdlib, no deps) serves a local gruvbox-styled page
-at `http://127.0.0.1:7333` for managing skills: archive, restore, delete,
-create groups and move skills between them, upload a folder from disk,
-scaffold a new skill, filter, and spot problems (broken symlinks, missing
-`SKILL.md`). Archiving moves a skill to `archive/` (group structure
-preserved), which Claude Code doesn't scan, so it stops loading everywhere;
-restore moves it back. Everything is plain file moves — review and commit
-with git as usual (the `work` group stays gitignored).
+`bin/claude-ui` (Python stdlib, no deps; `bin/skills-ui` still works as an
+alias) serves a local gruvbox-styled page at `http://127.0.0.1:7333` with a
+tab per config type. Every type supports archive/restore (to `archive/`,
+which Claude Code doesn't scan), delete, move into nested folders, upload
+from disk via the browser's folder picker, scaffolding, and filtering.
+Everything is plain file moves — review and commit with git as usual (a
+folder named `work` stays gitignored in every type).
 
-Uploading a folder that itself contains skill folders (no top-level
-`SKILL.md`) imports it as a whole group; naming an upload or new skill
-`<group>-<name>` files it directly into that group.
+The **links panel** at the top shows each mapping — `skills`, `commands`,
+`agents`, `CLAUDE.md`, `settings.json`, `keybindings.json` — with its live
+status (linked here, points elsewhere, real file/dir, missing) and
+link/unlink buttons. Linking over a real file or dir backs it up first
+(`<name>.bak`); if the repo side doesn't exist yet, linking **adopts** the
+existing content instead — moves it into the repo and symlinks back — which
+is how you first import a machine's config. The panel also sets the target
+config dir (persisted to the gitignored `.claude-ui.json`); note Claude
+Code itself only reads a non-default location if `CLAUDE_CONFIG_DIR` is
+exported in your shell.
 
-A banner at the top shows whether `~/.claude/skills` points at this repo;
-if not, a **link now** button sets up the symlink from step 2 for you
-(an existing real directory is backed up to `~/.claude/skills.bak` first).
-**⇪ upload** imports a folder via the browser's directory picker — name it
-`work-*` at the prompt to keep it out of git.
+Uploading a folder of skill folders (no top-level `SKILL.md`) imports it as
+a whole group; naming a skill upload or scaffold `<group>-<name>` files it
+into that group.
 
 ## Keybinding model
 

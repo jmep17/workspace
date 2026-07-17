@@ -1,0 +1,1167 @@
+#!/usr/bin/env python3
+"""Local web UI for managing Claude Code config in this repo.
+
+Usage:  bin/claude-ui [--port 7333]
+
+Manages every user-level Claude Code config type from one page:
+
+  skills/            dirs with SKILL.md; nested "groups" get auto-managed
+                     top-level <group>-<name> symlinks (Claude Code only
+                     discovers direct children of the skills dir)
+  commands/          slash commands: .md files; subdirs namespace natively
+                     (commands/git/pr.md -> /git:pr)
+  agents/            custom subagents: .md files
+  claude/            CLAUDE.md, settings.json, keybindings.json
+
+A links panel shows how each of these maps into the Claude config dir
+(default ~/.claude, or $CLAUDE_CONFIG_DIR, overridable in the UI and
+persisted to the gitignored .claude-ui.json). Linking backs up a real
+target first; if the repo side doesn't exist yet, linking "adopts" the
+real target by moving it into the repo and symlinking back. Stdlib only.
+"""
+
+import argparse
+import base64
+import json
+import os
+import re
+import shutil
+import sys
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SKILLS = REPO / "skills"
+ARCHIVE = REPO / "archive"
+CONFIG_FILE = REPO / ".claude-ui.json"
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+TYPES = {
+    "skills": {"kind": "dir", "root": SKILLS},
+    "commands": {"kind": "md", "root": REPO / "commands"},
+    "agents": {"kind": "md", "root": REPO / "agents"},
+}
+
+MAPPINGS = {
+    "skills": {"repo": SKILLS, "cfg": "skills", "kind": "dir"},
+    "commands": {"repo": REPO / "commands", "cfg": "commands", "kind": "dir"},
+    "agents": {"repo": REPO / "agents", "cfg": "agents", "kind": "dir"},
+    "CLAUDE.md": {"repo": REPO / "claude" / "CLAUDE.md", "cfg": "CLAUDE.md", "kind": "file"},
+    "settings.json": {"repo": REPO / "claude" / "settings.json", "cfg": "settings.json", "kind": "file"},
+    "keybindings.json": {"repo": REPO / "claude" / "keybindings.json", "cfg": "keybindings.json", "kind": "file"},
+}
+
+
+def config_dir():
+    if CONFIG_FILE.is_file():
+        try:
+            p = json.loads(CONFIG_FILE.read_text()).get("config_dir")
+            if p:
+                return Path(p).expanduser()
+        except (json.JSONDecodeError, OSError):
+            pass
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(env).expanduser() if env else Path.home() / ".claude"
+
+
+def set_config_dir(path):
+    if not path:
+        CONFIG_FILE.unlink(missing_ok=True)
+        return
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        raise ValueError("config dir must be an absolute path (or start with ~)")
+    CONFIG_FILE.write_text(json.dumps({"config_dir": str(p)}, indent=2) + "\n")
+
+
+def parse_frontmatter(text):
+    meta = {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return meta
+    key = None
+    buf = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if m:
+            if key and buf:
+                meta[key] = " ".join(buf).strip()
+            val = m.group(2).strip()
+            if val in (">", "|", ">-", "|-"):
+                key, buf = m.group(1), []
+            else:
+                meta[m.group(1)] = val
+                key, buf = None, []
+        elif key and line.startswith((" ", "\t")):
+            buf.append(line.strip())
+    if key and buf:
+        meta[key] = " ".join(buf).strip()
+    return meta
+
+
+# ---------------------------------------------------------------- skills (dir kind)
+
+SK_ARCHIVE = ARCHIVE / "skills"
+
+
+def is_group(entry):
+    """A group is a real (non-symlink) dir without its own SKILL.md."""
+    return (entry.is_dir() and not entry.is_symlink()
+            and not entry.name.startswith(".")
+            and not (entry / "SKILL.md").is_file())
+
+
+def group_names():
+    names = set()
+    for root in (SKILLS, SK_ARCHIVE):
+        if root.is_dir():
+            names.update(e.name for e in root.iterdir() if is_group(e))
+    return sorted(names)
+
+
+def split_managed(name):
+    """'<g>-<x>' -> (g, x) if g is a known group (longest match), else None."""
+    for g in sorted(group_names(), key=len, reverse=True):
+        if name.startswith(g + "-") and len(name) > len(g) + 1:
+            return g, name[len(g) + 1:]
+    return None
+
+
+def reconcile_links():
+    """Keep top-level <group>-<name> symlinks in sync with group contents."""
+    if not SKILLS.is_dir():
+        return
+    for entry in sorted(SKILLS.iterdir()):
+        if not is_group(entry):
+            continue
+        for d in sorted(entry.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                link = SKILLS / f"{entry.name}-{d.name}"
+                if not (link.exists() or link.is_symlink()):
+                    link.symlink_to(Path(entry.name) / d.name)
+    for entry in SKILLS.iterdir():
+        if not entry.is_symlink():
+            continue
+        raw = entry.readlink()
+        target = raw if raw.is_absolute() else SKILLS / raw
+        try:
+            inside = target.resolve().is_relative_to(SKILLS.resolve())
+        except OSError:
+            inside = False
+        if inside and not target.exists():
+            entry.unlink()
+
+
+def skill_item(entry, scope, name=None, group=None):
+    skill_md = entry / "SKILL.md"
+    meta = parse_frontmatter(skill_md.read_text(errors="replace")) if skill_md.is_file() else {}
+    n = name or entry.name
+    return {
+        "name": n, "scope": scope, "symlink": entry.is_symlink(),
+        "group": group, "managed": group is not None,
+        "local": n.startswith("work-") or group == "work",
+        "broken": False, "incomplete": not skill_md.is_file(),
+        "description": meta.get("description", ""),
+        "path": str(entry),
+        "movable": scope == "active" and (group is not None or not entry.is_symlink()),
+    }
+
+
+def scan_skills(root, scope):
+    items = []
+    if not root.is_dir():
+        return items
+    root_res = root.resolve()
+    for entry in sorted(root.iterdir()):
+        if entry.name.startswith("."):
+            continue
+        if is_group(entry):
+            if root != SKILLS:  # archived group members have no links
+                for d in sorted(entry.iterdir()):
+                    if d.is_dir() and not d.name.startswith("."):
+                        items.append(skill_item(d, scope, name=f"{entry.name}-{d.name}",
+                                                group=entry.name))
+            continue
+        if not entry.is_dir():
+            if entry.is_symlink():
+                items.append({
+                    "name": entry.name, "scope": scope, "broken": True,
+                    "symlink": True, "group": None, "managed": False,
+                    "local": entry.name.startswith("work-"), "movable": False,
+                    "incomplete": False,
+                    "description": "(broken symlink: " + str(entry.readlink()) + ")",
+                })
+            continue
+        group = None
+        if entry.is_symlink():
+            try:
+                rp = entry.resolve()
+                if rp.parent != root_res and rp.parent.parent == root_res:
+                    group = rp.parent.name
+            except OSError:
+                pass
+        items.append(skill_item(entry, scope, group=group))
+    return items
+
+
+def skills_group_info():
+    out = []
+    if not SKILLS.is_dir():
+        return out
+    for entry in sorted(SKILLS.iterdir()):
+        if not is_group(entry):
+            continue
+        members = [d for d in entry.iterdir() if d.is_dir() and not d.name.startswith(".")]
+        out.append({
+            "name": entry.name,
+            "members": len(members),
+            "incomplete": sum(1 for d in members if not (d / "SKILL.md").is_file()),
+            "loose_files": sum(1 for f in entry.iterdir()
+                               if f.is_file() and not f.name.startswith(".")),
+        })
+    return out
+
+
+def resolve_skill(scope, name):
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad name")
+    root = SKILLS if scope == "active" else SK_ARCHIVE
+    path = root / name
+    if path.parent != root:
+        raise ValueError("bad path")
+    return path
+
+
+def skill_creation_path(name):
+    sm = split_managed(name)
+    return SKILLS / sm[0] / sm[1] if sm else SKILLS / name
+
+
+# ---------------------------------------------------------------- md kinds (commands, agents)
+
+def md_rel(name):
+    """Validate a possibly-nested item name -> relative Path (no extension)."""
+    parts = [p for p in (name or "").split("/") if p]
+    if not parts or any(not NAME_RE.match(p) for p in parts):
+        raise ValueError("bad name")
+    return Path(*parts)
+
+
+def md_path(type_, scope, name):
+    root = TYPES[type_]["root"] if scope == "active" else ARCHIVE / type_
+    return root / md_rel(name).with_suffix(".md")
+
+
+def scan_md(type_, scope):
+    root = TYPES[type_]["root"] if scope == "active" else ARCHIVE / type_
+    items = []
+    if not root.is_dir():
+        return items
+    for p in sorted(root.rglob("*.md")):
+        rel = p.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        broken = p.is_symlink() and not p.exists()
+        meta = {} if broken else parse_frontmatter(p.read_text(errors="replace"))
+        group = str(rel.parent) if str(rel.parent) != "." else None
+        items.append({
+            "name": str(rel)[:-3], "scope": scope, "symlink": p.is_symlink(),
+            "group": group, "managed": False,
+            "local": (rel.parts[0] == "work") if group else False,
+            "broken": broken, "incomplete": False,
+            "description": ("(broken symlink: " + str(p.readlink()) + ")") if broken
+                           else meta.get("description", ""),
+            "path": str(p),
+            "movable": scope == "active" and not broken,
+        })
+    return items
+
+
+def md_group_info(type_):
+    root = TYPES[type_]["root"]
+    out = []
+    if not root.is_dir():
+        return out
+    for d in sorted(root.rglob("*")):
+        if not d.is_dir() or d.is_symlink():
+            continue
+        rel = d.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        mds = [f for f in d.iterdir() if f.name.endswith(".md")]
+        out.append({
+            "name": str(rel),
+            "members": len(mds),
+            "incomplete": 0,
+            "loose_files": sum(1 for f in d.iterdir()
+                               if f.is_file() and not f.name.endswith(".md")
+                               and not f.name.startswith(".")),
+        })
+    return out
+
+
+def md_groups(type_):
+    return [g["name"] for g in md_group_info(type_)]
+
+
+# ---------------------------------------------------------------- links panel
+
+def link_state():
+    cfg = config_dir()
+    home = str(Path.home())
+    rows = []
+    for mid, m in MAPPINGS.items():
+        target = cfg / m["cfg"]
+        row = {"id": mid, "kind": m["kind"],
+               "repo": str(m["repo"].relative_to(REPO)),
+               "target": str(target).replace(home, "~", 1),
+               "repo_exists": m["repo"].exists()}
+        if target.is_symlink():
+            try:
+                ok = target.resolve() == m["repo"].resolve()
+            except OSError:
+                ok = False
+            row["status"] = "linked" if ok else "elsewhere"
+            if not ok:
+                row["points_to"] = str(target.readlink())
+        elif target.exists():
+            row["status"] = "real" if m["repo"].exists() else "adopt"
+        else:
+            row["status"] = "missing" if m["repo"].exists() else "absent"
+        rows.append(row)
+    return rows
+
+
+def do_link(mid):
+    m = MAPPINGS.get(mid)
+    if not m:
+        raise ValueError("unknown link id")
+    target = config_dir() / m["cfg"]
+    repo_side = m["repo"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup = adopted = None
+    if target.is_symlink():
+        target.unlink()
+    elif target.exists():
+        if repo_side.exists():
+            n = 0
+            while True:
+                backup = target.with_name(target.name + ".bak" + (str(n) if n else ""))
+                if not (backup.exists() or backup.is_symlink()):
+                    break
+                n += 1
+            target.rename(backup)
+        else:
+            repo_side.parent.mkdir(parents=True, exist_ok=True)
+            target.rename(repo_side)
+            adopted = True
+    if not repo_side.exists():
+        if m["kind"] == "file":
+            raise ValueError(f"{m['repo'].name} doesn't exist in the repo or the "
+                             "config dir yet — nothing to link")
+        repo_side.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(repo_side)
+    return {"backup": str(backup) if backup else None, "adopted": bool(adopted)}
+
+
+def do_unlink(mid):
+    m = MAPPINGS.get(mid)
+    if not m:
+        raise ValueError("unknown link id")
+    target = config_dir() / m["cfg"]
+    if not target.is_symlink():
+        raise ValueError(f"{m['cfg']}: not a symlink")
+    target.unlink()
+
+
+# ---------------------------------------------------------------- upload helpers
+
+def stage_upload(files):
+    staged = []
+    total = 0
+    for f in files or []:
+        rel = f.get("path", "")
+        parts = [p for p in rel.split("/") if p]
+        if not parts or rel.startswith("/") or ".." in parts:
+            raise ValueError(f"bad file path in upload: {rel}")
+        data = base64.b64decode(f.get("content_b64", ""))
+        total += len(data)
+        if total > 20 * 1024 * 1024:
+            raise ValueError("upload too large (>20 MB)")
+        staged.append((Path(*parts), data))
+    if not staged:
+        raise ValueError("no files in upload")
+    return staged
+
+
+def write_staged(staged, base):
+    written = []
+    try:
+        for rel, data in staged:
+            dest = base / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            written.append(dest)
+    except OSError:
+        for w in written:
+            w.unlink(missing_ok=True)
+        raise
+
+
+def normalize_skill_upload(staged):
+    """Strip redundant wrapper dirs when nothing valid exists at this level."""
+    for _ in range(8):
+        paths = {p for p, _ in staged}
+        if any(p.parts == ("SKILL.md",) for p in paths):
+            break
+        if any(len(p.parts) == 2 and p.parts[1] == "SKILL.md" for p in paths):
+            break
+        tops = {p.parts[0] for p in paths}
+        if len(tops) != 1 or any(len(p.parts) == 1 for p in paths):
+            break
+        staged = [(Path(*p.parts[1:]), d) for p, d in staged]
+    return staged
+
+
+def classify_skill_upload(staged):
+    paths = {p for p, _ in staged}
+    if any(p.parts == ("SKILL.md",) for p in paths):
+        return "skill", 1
+    skill_dirs = {p.parts[0] for p in paths
+                  if len(p.parts) == 2 and p.parts[1] == "SKILL.md"}
+    if not skill_dirs:
+        raise ValueError(
+            "no SKILL.md found in upload — a single skill needs SKILL.md at "
+            "its root; a group import needs one in each skill subfolder")
+    return "group", len(skill_dirs)
+
+
+SKILL_TEMPLATE = """---
+name: {name}
+description: TODO — one sentence on what this does, then "Use when ..." triggers.
+---
+
+# {name}
+
+TODO: instructions.
+"""
+
+COMMAND_TEMPLATE = """---
+description: TODO — what this command does.
+---
+
+TODO: prompt. Use $ARGUMENTS for arguments passed after the command.
+"""
+
+AGENT_TEMPLATE = """---
+name: {name}
+description: TODO — when to use this agent.
+---
+
+TODO: system prompt for the agent.
+"""
+
+TEMPLATES = {"commands": COMMAND_TEMPLATE, "agents": AGENT_TEMPLATE}
+
+PAGE = """<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude config</title>
+<style>
+  :root {
+    --bg: #282828; --bg1: #3c3836; --bg2: #504945; --fg: #ebdbb2;
+    --fg2: #a89984; --yellow: #fabd2f; --green: #b8bb26; --red: #fb4934;
+    --blue: #83a598; --aqua: #8ec07c; --orange: #fe8019;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 "JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; color: var(--yellow); }
+  h1 .cfg { color: var(--fg2); font-weight: normal; }
+  .sub { color: var(--fg2); margin: 0 0 1.25rem; font-size: .85rem; }
+  button {
+    background: var(--bg1); color: var(--fg); border: 1px solid var(--bg2);
+    border-radius: 6px; padding: .45rem .8rem; font: inherit; font-size: .8rem;
+    cursor: pointer; white-space: nowrap;
+  }
+  button:hover { background: var(--bg2); }
+  button.primary { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: bold; }
+  button.danger:hover { color: var(--red); border-color: var(--red); }
+  button.small { padding: .2rem .55rem; font-size: .72rem; }
+  input[type=search], input[type=text] {
+    background: var(--bg1); border: 1px solid var(--bg2); color: var(--fg);
+    padding: .5rem .75rem; border-radius: 6px; font: inherit;
+  }
+  input:focus { outline: none; border-color: var(--blue); }
+  #links { border: 1px solid var(--bg2); border-radius: 8px; padding: .75rem .9rem; margin-bottom: 1.5rem; }
+  #links summary { cursor: pointer; color: var(--fg2); font-size: .8rem;
+    text-transform: uppercase; letter-spacing: .1em; }
+  #links summary .ok { color: var(--green); }
+  #links summary .warn { color: var(--orange); }
+  .lrow { display: flex; align-items: center; gap: .6rem; padding: .4rem 0;
+    border-bottom: 1px solid var(--bg1); font-size: .82rem; }
+  .lrow:last-child { border-bottom: 0; }
+  .lrow .lname { min-width: 11rem; flex-shrink: 0; padding-right: .4rem; color: var(--aqua); }
+  .lrow .lstat { flex: 1; color: var(--fg2); }
+  .lrow .lstat.ok { color: var(--green); }
+  .lrow .lstat.warn { color: var(--orange); }
+  .cfgdir { display: flex; gap: .6rem; align-items: center; margin-top: .7rem; font-size: .82rem; }
+  .cfgdir input { flex: 1; padding: .35rem .6rem; }
+  .cfgdir .hint { color: var(--fg2); font-size: .72rem; margin-top: .35rem; }
+  .tabs { display: flex; gap: .25rem; margin-bottom: 1rem; }
+  .tabs button { border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent; }
+  .tabs button.on { color: var(--yellow); border-bottom-color: var(--yellow); background: var(--bg1); }
+  .bar { display: flex; gap: .75rem; margin-bottom: 1.25rem; }
+  .bar input[type=search] { flex: 1; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .1em;
+       color: var(--fg2); margin: 2rem 0 .5rem; }
+  h2 .count { color: var(--bg2); }
+  .row {
+    display: flex; align-items: baseline; gap: .75rem; padding: .65rem .75rem;
+    border-bottom: 1px solid var(--bg1);
+  }
+  .row:hover { background: var(--bg1); border-radius: 6px; }
+  .row .name { color: var(--aqua); font-weight: bold; white-space: nowrap; }
+  .row.archived .name { color: var(--fg2); }
+  .row .desc { flex: 1; color: var(--fg2); font-size: .82rem;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; }
+  .badge { font-size: .68rem; padding: .05rem .45rem; border-radius: 99px;
+    border: 1px solid; white-space: nowrap; }
+  .badge.local { color: var(--orange); border-color: var(--orange); }
+  .badge.group { color: var(--yellow); border-color: var(--yellow); }
+  .badge.link { color: var(--blue); border-color: var(--blue); }
+  .badge.warn { color: var(--red); border-color: var(--red); }
+  .actions { display: flex; gap: .4rem; }
+  .actions button { padding: .25rem .6rem; font-size: .72rem; }
+  .empty { color: var(--bg2); padding: .65rem .75rem; font-size: .85rem; }
+  .groups { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+    margin: -.5rem 0 1.25rem; font-size: .75rem; color: var(--fg2); }
+  .chip { border: 1px solid var(--bg2); border-radius: 99px; padding: .1rem .6rem; }
+  .chip .warn { color: var(--red); }
+  .chip a { color: var(--red); text-decoration: none; }
+  #toast {
+    position: fixed; bottom: 1.25rem; left: 50%; translate: -50% 0;
+    background: var(--bg2); color: var(--fg); padding: .6rem 1rem;
+    border-radius: 8px; font-size: .85rem; opacity: 0; transition: opacity .2s;
+    pointer-events: none; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { color: var(--red); }
+</style>
+<main>
+  <h1><span class="cfg" id="cfgprefix">~/.claude/</span>config</h1>
+  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Everything is plain files: review &amp; commit with git as usual.</p>
+  <details id="links" open>
+    <summary>links <span id="linksum"></span></summary>
+    <div id="linkrows"></div>
+    <div class="cfgdir">
+      <span>config dir</span>
+      <input type="text" id="cfgdir" placeholder="~/.claude">
+      <button class="small" onclick="saveCfgDir()">set</button>
+      <button class="small" onclick="resetCfgDir()">reset</button>
+    </div>
+    <div class="cfgdir hint" id="cfghint"></div>
+  </details>
+  <div class="tabs" id="tabs"></div>
+  <div class="bar">
+    <input type="search" id="q" placeholder="filter…" autofocus>
+    <button onclick="newGroup()">+ group</button>
+    <button onclick="document.getElementById('up').click()">⇪ upload</button>
+    <button class="primary" onclick="newItem()">+ new</button>
+    <input type="file" id="up" webkitdirectory multiple hidden>
+  </div>
+  <div id="groups" class="groups" hidden></div>
+  <h2>Active <span class="count" id="n-active"></span></h2>
+  <div id="active"></div>
+  <h2>Archive <span class="count" id="n-archived"></span></h2>
+  <div id="archived"></div>
+</main>
+<div id="toast"></div>
+<script>
+let DATA = { types: {}, links: [], config_dir: "" };
+let TAB = "skills";
+
+async function api(path, body) {
+  const res = await fetch(path, body
+    ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
+    : {});
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || res.statusText);
+  return json;
+}
+
+function toast(msg, err) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "show" + (err ? " err" : "");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => (el.className = ""), err ? 5000 : 2500);
+}
+
+const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const STATUS_TEXT = {
+  linked: ["✓ linked", "ok"],
+  elsewhere: ["→ points elsewhere", "warn"],
+  real: ["real (link backs it up first)", "warn"],
+  adopt: ["real (link adopts it into the repo)", "warn"],
+  missing: ["not linked", "warn"],
+  absent: ["— nothing on either side", ""],
+};
+
+function renderLinks() {
+  const box = document.getElementById("linkrows");
+  box.innerHTML = "";
+  let ok = 0, warn = 0;
+  for (const l of DATA.links) {
+    const [txt, cls] = STATUS_TEXT[l.status] || [l.status, ""];
+    if (l.status === "linked") ok++;
+    else if (l.status !== "absent") warn++;
+    const row = document.createElement("div");
+    row.className = "lrow";
+    const extra = l.points_to ? " (" + esc(l.points_to) + ")" : "";
+    const canLink = l.status !== "linked" && l.status !== "absent";
+    const canUnlink = l.status === "linked" || l.status === "elsewhere";
+    row.innerHTML =
+      `<span class="lname">${esc(l.target)}</span>` +
+      `<span class="lstat ${cls}">${txt}${extra} · repo: ${esc(l.repo)}${l.repo_exists ? "" : " (missing)"}</span>` +
+      (canLink ? `<button class="small" onclick="doLink('${l.id}')">link</button>` : "") +
+      (canUnlink ? `<button class="small danger" onclick="doUnlink('${l.id}')">unlink</button>` : "");
+    box.appendChild(row);
+  }
+  document.getElementById("linksum").innerHTML =
+    ` — <span class="ok">${ok} linked</span>` + (warn ? `, <span class="warn">${warn} need attention</span>` : "");
+  document.getElementById("cfgprefix").textContent = DATA.config_dir.replace(/\\/?$/, "/");
+  document.getElementById("cfgdir").placeholder = DATA.config_dir;
+  document.getElementById("cfghint").textContent = DATA.default_dir
+    ? "" : "non-default config dir: Claude Code only uses it if CLAUDE_CONFIG_DIR is exported in your shell";
+}
+
+async function doLink(id) {
+  try {
+    const r = await api("/api/link", { id });
+    toast(r.adopted ? "linked — existing content adopted into the repo (commit it!)"
+      : r.backup ? "linked — previous content saved at " + r.backup : "linked");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function doUnlink(id) {
+  try { await api("/api/unlink", { id }); toast("unlinked"); await refresh(); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function saveCfgDir() {
+  try {
+    await api("/api/config-dir", { path: document.getElementById("cfgdir").value.trim() });
+    document.getElementById("cfgdir").value = "";
+    toast("config dir updated");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function resetCfgDir() {
+  try { await api("/api/config-dir", { path: "" }); toast("config dir reset to default"); await refresh(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function renderTabs() {
+  const el = document.getElementById("tabs");
+  el.innerHTML = "";
+  for (const t of Object.keys(DATA.types)) {
+    const b = document.createElement("button");
+    b.textContent = t + " · " + DATA.types[t].active.length;
+    b.className = t === TAB ? "on" : "";
+    b.onclick = () => { TAB = t; render(); };
+    el.appendChild(b);
+  }
+}
+
+function renderGroups() {
+  const el = document.getElementById("groups");
+  const gs = (DATA.types[TAB] || {}).group_info || [];
+  if (!gs.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = "folders: ";
+  for (const g of gs) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    let warn = "";
+    if (!g.members) warn = "empty";
+    else if (g.incomplete) warn = g.incomplete + " missing SKILL.md";
+    if (g.loose_files) warn += (warn ? ", " : "") + g.loose_files + " loose files";
+    chip.innerHTML =
+      esc(g.name) + "/ · " + g.members +
+      (warn ? ' <span class="warn">⚠ ' + esc(warn) + "</span>" : "") +
+      (!g.members && !g.loose_files
+        ? ` <a href="#" onclick="removeGroup('${g.name}');return false" title="remove empty folder">×</a>`
+        : "");
+    el.appendChild(chip);
+  }
+}
+
+function render() {
+  renderLinks();
+  renderTabs();
+  renderGroups();
+  const q = document.getElementById("q").value.toLowerCase();
+  const data = DATA.types[TAB] || { active: [], archived: [] };
+  for (const scope of ["active", "archived"]) {
+    const items = data[scope].filter(
+      (s) => !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q)
+    );
+    document.getElementById("n-" + scope).textContent = "· " + data[scope].length;
+    const box = document.getElementById(scope);
+    box.innerHTML = "";
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">' + (q ? "no matches" : "nothing here") + "</div>";
+      continue;
+    }
+    for (const s of items) {
+      const row = document.createElement("div");
+      row.className = "row " + scope;
+      const badges =
+        (s.group ? `<span class="badge group">${esc(s.group)}/</span>` : "") +
+        (s.local ? '<span class="badge local">gitignored</span>' : "") +
+        (s.symlink && !s.managed ? '<span class="badge link">symlink</span>' : "") +
+        (s.broken ? '<span class="badge warn">broken</span>' : "") +
+        (s.incomplete && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "");
+      const move = s.movable ? `<button onclick="moveToGroup('${s.name}')">move</button>` : "";
+      const act =
+        scope === "active"
+          ? `<button onclick="doAct('archive','${s.name}')">archive</button>`
+          : `<button onclick="doAct('restore','${s.name}')">restore</button>`;
+      row.innerHTML =
+        `<span class="name" title="${s.path || ""}">${esc(s.name)}</span>` + badges +
+        `<span class="desc">${esc(s.description || "")}</span>` +
+        `<span class="actions">${move}${act}<button class="danger" onclick="doDelete('${scope}','${s.name}',${s.managed})">delete</button></span>`;
+      box.appendChild(row);
+    }
+  }
+}
+
+async function refresh() {
+  DATA = await api("/api/state");
+  if (!DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
+  render();
+}
+
+async function doAct(action, name) {
+  try {
+    await api("/api/" + action, { type: TAB, name });
+    toast(name + (action === "archive" ? " → archive/" : " restored"));
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function moveToGroup(name) {
+  const gs = (DATA.types[TAB] || {}).groups || [];
+  const g = prompt(
+    "Move into folder — blank for top level" + (gs.length ? " (existing: " + gs.join(", ") + ")" : "") + ":", "");
+  if (g === null) return;
+  try {
+    const r = await api("/api/move", { type: TAB, name, group: g.trim() });
+    toast(name + " → " + r.name);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function newGroup() {
+  const name = prompt("New folder name — 'work' stays out of git:");
+  if (!name) return;
+  try {
+    await api("/api/group", { type: TAB, name: name.trim() });
+    toast(name + "/ created — use move to file items into it");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function removeGroup(name) {
+  try {
+    await api("/api/group-remove", { type: TAB, name });
+    toast(name + "/ removed");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function doDelete(scope, name, managed) {
+  const msg = managed
+    ? "Permanently delete " + name + " and its files inside its folder?"
+    : "Permanently delete " + name + "? (a symlink's target is untouched)";
+  if (!confirm(msg)) return;
+  try {
+    await api("/api/delete", { type: TAB, scope, name });
+    toast(name + " deleted");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function newItem() {
+  const hint = TAB === "skills"
+    ? "Skill name (kebab-case; '<group>-' prefix files it in that group, work- stays out of git):"
+    : "Name (use folder/name for nesting; work/ stays out of git):";
+  const name = prompt(hint);
+  if (!name) return;
+  try {
+    const r = await api("/api/new", { type: TAB, name: name.trim() });
+    toast("created " + r.path);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function uploadItems(ev) {
+  const files = [...ev.target.files].filter(
+    (f) => !/(^|\\/)(\\.git|node_modules)(\\/|$)|(^|\\/)\\.DS_Store$/.test(f.webkitRelativePath)
+  );
+  ev.target.value = "";
+  if (!files.length) return;
+  const root = files[0].webkitRelativePath.split("/")[0];
+  const name = prompt(TAB === "skills"
+    ? "Import as (a folder of skills becomes a group):"
+    : "Import into folder (blank = top level):", TAB === "skills" ? root : "");
+  if (name === null) return;
+  const payload = [];
+  for (const f of files) {
+    const rel = f.webkitRelativePath.split("/").slice(1).join("/");
+    if (!rel) continue;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = "";
+    for (const b of buf) bin += String.fromCharCode(b);
+    payload.push({ path: rel, content_b64: btoa(bin) });
+  }
+  try {
+    const r = await api("/api/upload", { type: TAB, name: name.trim(), files: payload });
+    toast(r.kind === "group"
+      ? "imported " + r.path + "/ as a group — " + r.skills + " skill" + (r.skills === 1 ? "" : "s") + " linked"
+      : "imported " + (r.path || TAB) + " (" + r.files + " files)");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+document.getElementById("up").addEventListener("change", uploadItems);
+document.getElementById("q").addEventListener("input", render);
+refresh();
+</script>
+"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def send(self, code, body, ctype="application/json"):
+        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("content-type", ctype)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def body(self):
+        n = int(self.headers.get("content-length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def do_GET(self):
+        if self.path == "/":
+            self.send(200, PAGE, "text/html; charset=utf-8")
+        elif self.path == "/api/state":
+            reconcile_links()
+            types = {}
+            for t, spec in TYPES.items():
+                if spec["kind"] == "dir":
+                    types[t] = {
+                        "active": scan_skills(SKILLS, "active"),
+                        "archived": scan_skills(SK_ARCHIVE, "archived"),
+                        "groups": sorted(e.name for e in SKILLS.iterdir() if is_group(e))
+                                  if SKILLS.is_dir() else [],
+                        "group_info": skills_group_info(),
+                    }
+                else:
+                    types[t] = {
+                        "active": scan_md(t, "active"),
+                        "archived": scan_md(t, "archived"),
+                        "groups": md_groups(t),
+                        "group_info": md_group_info(t),
+                    }
+            home = str(Path.home())
+            self.send(200, {
+                "types": types,
+                "links": link_state(),
+                "config_dir": str(config_dir()).replace(home, "~", 1),
+                "default_dir": not CONFIG_FILE.is_file() and not os.environ.get("CLAUDE_CONFIG_DIR"),
+            })
+        else:
+            self.send(404, {"error": "not found"})
+
+    def handle_skills(self, action, req):
+        name = req.get("name", "")
+        if action == "archive":
+            src = resolve_skill("active", name)
+            sm = split_managed(name)
+            if sm and src.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
+                g, x = sm
+                adir = SK_ARCHIVE / g
+                if (adir / x).exists():
+                    raise ValueError(f"{name}: already exists in archive/skills/{g}/")
+                adir.mkdir(parents=True, exist_ok=True)
+                (SKILLS / g / x).rename(adir / x)
+                src.unlink()
+            else:
+                if not (src.is_dir() or src.is_symlink()):
+                    raise ValueError(f"{name}: not found")
+                SK_ARCHIVE.mkdir(parents=True, exist_ok=True)
+                dst = SK_ARCHIVE / name
+                if dst.exists() or dst.is_symlink():
+                    raise ValueError(f"{name}: already exists in archive/skills/")
+                src.rename(dst)
+        elif action == "restore":
+            sm = split_managed(name)
+            if sm and (SK_ARCHIVE / sm[0] / sm[1]).is_dir():
+                g, x = sm
+                gdir = SKILLS / g
+                if (gdir / x).exists():
+                    raise ValueError(f"{name}: already exists in skills/{g}/")
+                gdir.mkdir(exist_ok=True)
+                (SK_ARCHIVE / g / x).rename(gdir / x)
+                reconcile_links()
+            else:
+                src = resolve_skill("archived", name)
+                if not (src.is_dir() or src.is_symlink()):
+                    raise ValueError(f"{name}: not found")
+                dst = SKILLS / name
+                if dst.exists() or dst.is_symlink():
+                    raise ValueError(f"{name}: already exists in skills/")
+                src.rename(dst)
+        elif action == "delete":
+            scope = req.get("scope", "")
+            if scope not in ("active", "archived"):
+                raise ValueError("bad scope")
+            path = resolve_skill(scope, name)
+            sm = split_managed(name)
+            root = SKILLS if scope == "active" else SK_ARCHIVE
+            content = root / sm[0] / sm[1] if sm else None
+            if scope == "active" and content and path.is_symlink() and content.is_dir():
+                path.unlink()
+                shutil.rmtree(content)
+            elif (scope == "archived" and content and content.is_dir()
+                    and not (path.exists() or path.is_symlink())):
+                shutil.rmtree(content)
+            elif path.is_symlink():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+            else:
+                raise ValueError(f"{name}: not found")
+        elif action == "move":
+            dest_g = (req.get("group") or "").strip()
+            if dest_g and not NAME_RE.match(dest_g):
+                raise ValueError("bad group name")
+            entry = resolve_skill("active", name)
+            sm = split_managed(name)
+            if sm and entry.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
+                src, link, base = SKILLS / sm[0] / sm[1], entry, sm[1]
+            elif entry.is_dir() and not entry.is_symlink():
+                src, link, base = entry, None, name
+            else:
+                raise ValueError(f"{name}: only real skill dirs and group members can move")
+            if dest_g:
+                gdir = SKILLS / dest_g
+                if not is_group(gdir):
+                    raise ValueError(f"{dest_g}: no such group (create it with + group)")
+                dst, new_name = gdir / base, f"{dest_g}-{base}"
+                taken = SKILLS / new_name
+                if taken.exists() or taken.is_symlink():
+                    raise ValueError(f"{new_name}: name already taken")
+            else:
+                dst, new_name = SKILLS / base, base
+            if dst == src:
+                raise ValueError(f"{name}: already there")
+            if dst.exists() or dst.is_symlink():
+                raise ValueError(f"{dst.name}: already exists")
+            src.rename(dst)
+            if link:
+                link.unlink()
+            reconcile_links()
+            return {"ok": True, "name": new_name}
+        elif action == "group":
+            if not NAME_RE.match(name):
+                raise ValueError("bad group name")
+            gdir = SKILLS / name
+            if gdir.exists() or gdir.is_symlink():
+                raise ValueError(f"{name}: already exists")
+            gdir.mkdir()
+        elif action == "group-remove":
+            gdir = resolve_skill("active", name)
+            if not is_group(gdir):
+                raise ValueError(f"{name}: not a group")
+            try:
+                gdir.rmdir()
+            except OSError:
+                raise ValueError(f"{name}: not empty") from None
+        elif action == "upload":
+            link = resolve_skill("active", name)
+            path = skill_creation_path(name)
+            if link.exists() or link.is_symlink() or path.exists():
+                raise ValueError(f"{name}: already exists")
+            staged = normalize_skill_upload(stage_upload(req.get("files")))
+            kind, nskills = classify_skill_upload(staged)
+            write_staged(staged, path)
+            reconcile_links()
+            return {"ok": True, "files": len(staged), "kind": kind, "skills": nskills,
+                    "path": str(path.relative_to(REPO))}
+        elif action == "new":
+            link = resolve_skill("active", name)
+            path = skill_creation_path(name)
+            if link.exists() or link.is_symlink() or path.exists():
+                raise ValueError(f"{name}: already exists")
+            path.mkdir(parents=True)
+            (path / "SKILL.md").write_text(SKILL_TEMPLATE.format(name=name))
+            reconcile_links()
+            return {"ok": True, "path": str(path.relative_to(REPO))}
+        else:
+            raise ValueError("unknown action")
+        return {"ok": True}
+
+    def handle_md(self, type_, action, req):
+        name = req.get("name", "")
+        root = TYPES[type_]["root"]
+        aroot = ARCHIVE / type_
+        if action == "archive":
+            src = md_path(type_, "active", name)
+            if not src.is_file():
+                raise ValueError(f"{name}: not found")
+            dst = md_path(type_, "archived", name)
+            if dst.exists():
+                raise ValueError(f"{name}: already archived")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+        elif action == "restore":
+            src = md_path(type_, "archived", name)
+            if not src.is_file():
+                raise ValueError(f"{name}: not found")
+            dst = md_path(type_, "active", name)
+            if dst.exists():
+                raise ValueError(f"{name}: already exists")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+        elif action == "delete":
+            scope = req.get("scope", "")
+            if scope not in ("active", "archived"):
+                raise ValueError("bad scope")
+            path = md_path(type_, scope, name)
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_file():
+                path.unlink()
+            else:
+                raise ValueError(f"{name}: not found")
+        elif action == "move":
+            dest_g = (req.get("group") or "").strip()
+            src = md_path(type_, "active", name)
+            if not src.is_file():
+                raise ValueError(f"{name}: not found")
+            base = md_rel(name).name
+            new_name = f"{dest_g}/{base}" if dest_g else base
+            dst = md_path(type_, "active", new_name)
+            if dst == src:
+                raise ValueError(f"{name}: already there")
+            if dst.exists():
+                raise ValueError(f"{new_name}: already exists")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+            return {"ok": True, "name": new_name}
+        elif action == "group":
+            gdir = root / md_rel(name)
+            if gdir.exists():
+                raise ValueError(f"{name}: already exists")
+            gdir.mkdir(parents=True)
+        elif action == "group-remove":
+            gdir = root / md_rel(name)
+            if not gdir.is_dir() or gdir.is_symlink():
+                raise ValueError(f"{name}: not a folder")
+            try:
+                gdir.rmdir()
+            except OSError:
+                raise ValueError(f"{name}: not empty") from None
+        elif action == "upload":
+            base = root / md_rel(name) if name else root
+            staged = stage_upload(req.get("files"))
+            if not any(p.suffix == ".md" for p, _ in staged):
+                raise ValueError(f"no .md files in upload — {type_} are markdown files")
+            for rel, _ in staged:
+                if (base / rel).exists():
+                    raise ValueError(f"{rel}: already exists")
+            base.mkdir(parents=True, exist_ok=True)
+            write_staged(staged, base)
+            return {"ok": True, "files": len(staged),
+                    "path": str(base.relative_to(REPO))}
+        elif action == "new":
+            path = md_path(type_, "active", name)
+            if path.exists():
+                raise ValueError(f"{name}: already exists")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(TEMPLATES[type_].format(name=md_rel(name).name))
+            return {"ok": True, "path": str(path.relative_to(REPO))}
+        else:
+            raise ValueError("unknown action")
+        return {"ok": True}
+
+    def do_POST(self):
+        try:
+            req = self.body()
+            action = self.path.removeprefix("/api/")
+            if action == "link":
+                r = do_link(req.get("id", ""))
+                self.send(200, {"ok": True, **r})
+                return
+            if action == "unlink":
+                do_unlink(req.get("id", ""))
+                self.send(200, {"ok": True})
+                return
+            if action == "config-dir":
+                set_config_dir((req.get("path") or "").strip())
+                self.send(200, {"ok": True})
+                return
+            type_ = req.get("type", "skills")
+            if type_ not in TYPES:
+                raise ValueError("unknown type")
+            if action not in ("archive", "restore", "delete", "move",
+                             "group", "group-remove", "upload", "new"):
+                self.send(404, {"error": "not found"})
+                return
+            if TYPES[type_]["kind"] == "dir":
+                result = self.handle_skills(action, req)
+            else:
+                result = self.handle_md(type_, action, req)
+            self.send(200, result)
+        except (ValueError, OSError, json.JSONDecodeError) as e:
+            self.send(400, {"error": str(e)})
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--port", type=int, default=7333)
+    ap.add_argument("--no-open", action="store_true", help="don't open a browser")
+    args = ap.parse_args()
+    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    url = f"http://127.0.0.1:{args.port}"
+    print(f"claude-ui: {url}  (repo: {REPO}, config dir: {config_dir()})")
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

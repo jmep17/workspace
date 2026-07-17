@@ -1,7 +1,12 @@
 .serena/
+.claude-ui.json
 
-# The "work" group stays uncommitted: its content dir and its generated links
+# The "work" folder stays uncommitted in every config type
 skills/work/
 skills/work-*
-archive/work/
-archive/work-*
+commands/work/
+agents/work/
+archive/skills/work/
+archive/skills/work-*
+archive/commands/work/
+archive/agents/work/
