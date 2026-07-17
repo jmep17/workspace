@@ -91,6 +91,7 @@ return {
         "html",
         "cssls",
         "tailwindcss",
+        "emmet_language_server",
       }
 
       -- mason-lspconfig maps these names to Mason packages and installs them;
