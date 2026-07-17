@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""Local web UI for managing Claude Code skills in this repo.
+
+Usage:  bin/skills-ui [--port 7333]
+
+Lists every skill under skills/ (and archive/), with actions:
+archive, restore, delete, and scaffolding a new skill. Stdlib only.
+"""
+
+import argparse
+import json
+import re
+import shutil
+import sys
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SKILLS = REPO / "skills"
+ARCHIVE = REPO / "archive"
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def parse_frontmatter(text):
+    meta = {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return meta
+    key = None
+    buf = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if m:
+            if key and buf:
+                meta[key] = " ".join(buf).strip()
+            val = m.group(2).strip()
+            if val in (">", "|", ">-", "|-"):
+                key, buf = m.group(1), []
+            else:
+                meta[m.group(1)] = val
+                key, buf = None, []
+        elif key and line.startswith((" ", "\t")):
+            buf.append(line.strip())
+    if key and buf:
+        meta[key] = " ".join(buf).strip()
+    return meta
+
+
+def scan(root, scope):
+    items = []
+    if not root.is_dir():
+        return items
+    for entry in sorted(root.iterdir()):
+        if entry.name.startswith(".") or not entry.is_dir():
+            # is_dir() follows symlinks, so broken links land here too
+            if entry.is_symlink():
+                items.append({
+                    "name": entry.name, "scope": scope, "broken": True,
+                    "symlink": True, "description": "(broken symlink: "
+                    + str(Path(entry).readlink()) + ")", "files": 0,
+                })
+            continue
+        skill_md = entry / "SKILL.md"
+        meta = {}
+        if skill_md.is_file():
+            meta = parse_frontmatter(skill_md.read_text(errors="replace"))
+        files = sum(1 for p in entry.rglob("*") if p.is_file())
+        items.append({
+            "name": entry.name,
+            "scope": scope,
+            "symlink": entry.is_symlink(),
+            "local": entry.name.startswith("work-"),
+            "broken": False,
+            "has_skill_md": skill_md.is_file(),
+            "description": meta.get("description", ""),
+            "files": files,
+            "path": str(entry),
+        })
+    return items
+
+
+def resolve(scope, name):
+    """Return the entry path for a validated (scope, name), or raise."""
+    if scope not in ("active", "archived"):
+        raise ValueError("bad scope")
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad skill name")
+    root = SKILLS if scope == "active" else ARCHIVE
+    path = root / name
+    if path.parent != root:
+        raise ValueError("bad path")
+    return path
+
+
+def move_entry(src, dst_root):
+    if not (src.is_dir() or src.is_symlink()):
+        raise ValueError(f"{src.name}: not found")
+    dst_root.mkdir(exist_ok=True)
+    dst = dst_root / src.name
+    if dst.exists() or dst.is_symlink():
+        raise ValueError(f"{dst.name}: already exists in {dst_root.name}/")
+    src.rename(dst)
+
+
+SKILL_TEMPLATE = """---
+name: {name}
+description: TODO — one sentence on what this does, then "Use when ..." triggers.
+---
+
+# {name}
+
+TODO: instructions.
+"""
+
+PAGE = """<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skills</title>
+<style>
+  :root {
+    --bg: #282828; --bg1: #3c3836; --bg2: #504945; --fg: #ebdbb2;
+    --fg2: #a89984; --yellow: #fabd2f; --green: #b8bb26; --red: #fb4934;
+    --blue: #83a598; --aqua: #8ec07c; --orange: #fe8019;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 "JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; color: var(--yellow); }
+  h1::before { content: "~/.claude/"; color: var(--fg2); font-weight: normal; }
+  .sub { color: var(--fg2); margin: 0 0 1.5rem; font-size: .85rem; }
+  .bar { display: flex; gap: .75rem; margin-bottom: 1.5rem; }
+  input[type=search] {
+    flex: 1; background: var(--bg1); border: 1px solid var(--bg2);
+    color: var(--fg); padding: .5rem .75rem; border-radius: 6px; font: inherit;
+  }
+  input[type=search]:focus { outline: none; border-color: var(--blue); }
+  button {
+    background: var(--bg1); color: var(--fg); border: 1px solid var(--bg2);
+    border-radius: 6px; padding: .45rem .8rem; font: inherit; font-size: .8rem;
+    cursor: pointer; white-space: nowrap;
+  }
+  button:hover { background: var(--bg2); }
+  button.primary { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: bold; }
+  button.danger:hover { color: var(--red); border-color: var(--red); }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .1em;
+       color: var(--fg2); margin: 2rem 0 .5rem; }
+  h2 .count { color: var(--bg2); }
+  .row {
+    display: flex; align-items: baseline; gap: .75rem; padding: .65rem .75rem;
+    border-bottom: 1px solid var(--bg1);
+  }
+  .row:hover { background: var(--bg1); border-radius: 6px; }
+  .row .name { color: var(--aqua); font-weight: bold; white-space: nowrap; }
+  .row.archived .name { color: var(--fg2); }
+  .row .desc { flex: 1; color: var(--fg2); font-size: .82rem;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; }
+  .badge { font-size: .68rem; padding: .05rem .45rem; border-radius: 99px;
+    border: 1px solid; white-space: nowrap; }
+  .badge.local { color: var(--orange); border-color: var(--orange); }
+  .badge.link { color: var(--blue); border-color: var(--blue); }
+  .badge.warn { color: var(--red); border-color: var(--red); }
+  .actions { display: flex; gap: .4rem; }
+  .actions button { padding: .25rem .6rem; font-size: .72rem; }
+  .empty { color: var(--bg2); padding: .65rem .75rem; font-size: .85rem; }
+  #toast {
+    position: fixed; bottom: 1.25rem; left: 50%; translate: -50% 0;
+    background: var(--bg2); color: var(--fg); padding: .6rem 1rem;
+    border-radius: 8px; font-size: .85rem; opacity: 0; transition: opacity .2s;
+    pointer-events: none; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { color: var(--red); }
+</style>
+<main>
+  <h1>skills</h1>
+  <p class="sub">Active skills load in Claude Code everywhere; archived ones sit in <b>archive/</b> and don't. Moves are plain renames — review &amp; commit with git as usual.</p>
+  <div class="bar">
+    <input type="search" id="q" placeholder="filter…" autofocus>
+    <button class="primary" onclick="newSkill()">+ new skill</button>
+  </div>
+  <h2>Active <span class="count" id="n-active"></span></h2>
+  <div id="active"></div>
+  <h2>Archive <span class="count" id="n-archived"></span></h2>
+  <div id="archived"></div>
+</main>
+<div id="toast"></div>
+<script>
+let DATA = { active: [], archived: [] };
+
+async function api(path, body) {
+  const res = await fetch(path, body
+    ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
+    : {});
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || res.statusText);
+  return json;
+}
+
+function toast(msg, err) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "show" + (err ? " err" : "");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => (el.className = ""), err ? 5000 : 2500);
+}
+
+function render() {
+  const q = document.getElementById("q").value.toLowerCase();
+  for (const scope of ["active", "archived"]) {
+    const items = DATA[scope].filter(
+      (s) => !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q)
+    );
+    document.getElementById("n-" + scope).textContent = "· " + DATA[scope].length;
+    const box = document.getElementById(scope);
+    box.innerHTML = "";
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">' + (q ? "no matches" : "nothing here") + "</div>";
+      continue;
+    }
+    for (const s of items) {
+      const row = document.createElement("div");
+      row.className = "row " + scope;
+      const badges =
+        (s.local ? '<span class="badge local">work-local</span>' : "") +
+        (s.symlink ? '<span class="badge link">symlink</span>' : "") +
+        (s.broken ? '<span class="badge warn">broken</span>' : "") +
+        (s.has_skill_md === false && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "");
+      const act =
+        scope === "active"
+          ? `<button onclick="doMove('archive','${s.name}')">archive</button>`
+          : `<button onclick="doMove('restore','${s.name}')">restore</button>`;
+      row.innerHTML =
+        `<span class="name" title="${s.path || ""}">${s.name}</span>` + badges +
+        `<span class="desc">${esc(s.description || "")}</span>` +
+        `<span class="actions">${act}<button class="danger" onclick="doDelete('${scope}','${s.name}')">delete</button></span>`;
+      box.appendChild(row);
+    }
+  }
+}
+
+const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function refresh() {
+  DATA = await api("/api/skills");
+  render();
+}
+
+async function doMove(action, name) {
+  try {
+    await api("/api/" + action, { name });
+    toast(name + (action === "archive" ? " → archive/" : " → skills/"));
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function doDelete(scope, name) {
+  if (!confirm("Permanently delete " + name + "? (a symlink's target is untouched)")) return;
+  try {
+    await api("/api/delete", { scope, name });
+    toast(name + " deleted");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function newSkill() {
+  const name = prompt("Skill name (kebab-case; prefix work- to keep it out of git):");
+  if (!name) return;
+  try {
+    const r = await api("/api/new", { name: name.trim() });
+    toast("created " + r.path + " — edit its SKILL.md");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+document.getElementById("q").addEventListener("input", render);
+refresh();
+</script>
+"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def send(self, code, body, ctype="application/json"):
+        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("content-type", ctype)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def body(self):
+        n = int(self.headers.get("content-length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def do_GET(self):
+        if self.path == "/":
+            self.send(200, PAGE, "text/html; charset=utf-8")
+        elif self.path == "/api/skills":
+            self.send(200, {"active": scan(SKILLS, "active"),
+                            "archived": scan(ARCHIVE, "archived")})
+        else:
+            self.send(404, {"error": "not found"})
+
+    def do_POST(self):
+        try:
+            req = self.body()
+            name = req.get("name", "")
+            if self.path == "/api/archive":
+                move_entry(resolve("active", name), ARCHIVE)
+            elif self.path == "/api/restore":
+                move_entry(resolve("archived", name), SKILLS)
+            elif self.path == "/api/delete":
+                path = resolve(req.get("scope", ""), name)
+                if path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    raise ValueError(f"{name}: not found")
+            elif self.path == "/api/new":
+                path = resolve("active", name)
+                if path.exists() or path.is_symlink():
+                    raise ValueError(f"{name}: already exists")
+                path.mkdir(parents=True)
+                (path / "SKILL.md").write_text(SKILL_TEMPLATE.format(name=name))
+                self.send(200, {"ok": True, "path": str(path.relative_to(REPO))})
+                return
+            else:
+                self.send(404, {"error": "not found"})
+                return
+            self.send(200, {"ok": True})
+        except (ValueError, OSError, json.JSONDecodeError) as e:
+            self.send(400, {"error": str(e)})
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--port", type=int, default=7333)
+    ap.add_argument("--no-open", action="store_true", help="don't open a browser")
+    args = ap.parse_args()
+    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    url = f"http://127.0.0.1:{args.port}"
+    print(f"skills-ui: {url}  (repo: {REPO})")
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

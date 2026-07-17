@@ -9,6 +9,8 @@ nvim/      Neovim config (see nvim/README.md for details)
 tmux/      tmux.conf — C-a prefix, vi copy mode, gruvbox status line
 ghostty/   Ghostty config — gruvbox theme, ⌘-key tmux bindings
 skills/    Claude Code skills, symlinked as ~/.claude/skills
+archive/   Retired skills — kept in git, not loaded by Claude Code
+bin/       skills-ui — local web UI for managing skills
 ```
 
 ## Fresh machine setup
@@ -83,6 +85,16 @@ ln -s ~/work-skills/deploy-checklist ~/src/workspace/skills/work-deploy-checklis
 Claude Code follows nested symlinks, so the skill loads like any other while
 its content stays out of this repo — keep `~/work-skills` in its own
 (private) repo if it should be versioned and backed up.
+
+### skills-ui
+
+`bin/skills-ui` (Python stdlib, no deps) serves a local gruvbox-styled page
+at `http://127.0.0.1:7333` for managing skills: archive, restore, delete,
+scaffold a new one, filter, and spot problems (broken symlinks, missing
+`SKILL.md`). Archiving moves a skill to `archive/`, which Claude Code
+doesn't scan, so it stops loading everywhere; restore moves it back. Moves
+are plain renames on disk — review and commit them with git as usual
+(archived `work-*` skills stay gitignored).
 
 ## Keybinding model
 
