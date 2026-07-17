@@ -13,7 +13,15 @@ Manages every user-level Claude Code config type from one page:
   agents/            custom subagents: .md files
   claude/            CLAUDE.md, settings.json, keybindings.json
 
-A links panel shows how each of these maps into the Claude config dir
+Collections: any other top-level dir shaped like a Claude config
+(containing skills/, commands/, agents/, CLAUDE.md, ...) — e.g. work/ —
+is bridged in automatically: its skills get top-level <collection>-<name>
+links, its commands/agents get a <type>/<collection> dir symlink (native
+namespacing), and its config files become selectable sources in the links
+panel. The work/ collection is gitignored; upload as many others as you
+like via the folder picker.
+
+A links panel shows how each mapping lands in the Claude config dir
 (default ~/.claude, or $CLAUDE_CONFIG_DIR, overridable in the UI and
 persisted to the gitignored .claude-ui.json). Linking backs up a real
 target first; if the repo side doesn't exist yet, linking "adopts" the
@@ -44,36 +52,102 @@ TYPES = {
     "agents": {"kind": "md", "root": REPO / "agents"},
 }
 
+CONFIG_FILES = ("CLAUDE.md", "settings.json", "keybindings.json")
+
 MAPPINGS = {
-    "skills": {"repo": SKILLS, "cfg": "skills", "kind": "dir"},
-    "commands": {"repo": REPO / "commands", "cfg": "commands", "kind": "dir"},
-    "agents": {"repo": REPO / "agents", "cfg": "agents", "kind": "dir"},
-    "CLAUDE.md": {"repo": REPO / "claude" / "CLAUDE.md", "cfg": "CLAUDE.md", "kind": "file"},
-    "settings.json": {"repo": REPO / "claude" / "settings.json", "cfg": "settings.json", "kind": "file"},
-    "keybindings.json": {"repo": REPO / "claude" / "keybindings.json", "cfg": "keybindings.json", "kind": "file"},
+    "skills": {"cfg": "skills", "kind": "dir"},
+    "commands": {"cfg": "commands", "kind": "dir"},
+    "agents": {"cfg": "agents", "kind": "dir"},
+    **{f: {"cfg": f, "kind": "file"} for f in CONFIG_FILES},
 }
+
+# top-level dirs that are never collections
+NON_COLLECTIONS = {"bin", "docs", "archive", "claude", "skills", "commands",
+                   "agents", "nvim", "tmux", "ghostty", "prompts"}
+
+COLLECTION_MARKERS = ("skills", "commands", "agents") + CONFIG_FILES
+
+
+def collections():
+    """Top-level dirs shaped like a Claude config (e.g. work/)."""
+    out = []
+    for e in sorted(REPO.iterdir()):
+        if (not e.is_dir() or e.is_symlink() or e.name.startswith(".")
+                or e.name in NON_COLLECTIONS):
+            continue
+        if any((e / m).exists() for m in COLLECTION_MARKERS):
+            out.append(e.name)
+    return out
+
+
+# ---------------------------------------------------------------- machine-local config
+
+def read_cfg():
+    if CONFIG_FILE.is_file():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def write_cfg(cfg):
+    if not cfg:
+        CONFIG_FILE.unlink(missing_ok=True)
+    else:
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
 def config_dir():
-    if CONFIG_FILE.is_file():
-        try:
-            p = json.loads(CONFIG_FILE.read_text()).get("config_dir")
-            if p:
-                return Path(p).expanduser()
-        except (json.JSONDecodeError, OSError):
-            pass
+    p = read_cfg().get("config_dir")
+    if p:
+        return Path(p).expanduser()
     env = os.environ.get("CLAUDE_CONFIG_DIR")
     return Path(env).expanduser() if env else Path.home() / ".claude"
 
 
 def set_config_dir(path):
+    cfg = read_cfg()
     if not path:
-        CONFIG_FILE.unlink(missing_ok=True)
-        return
-    p = Path(path).expanduser()
-    if not p.is_absolute():
-        raise ValueError("config dir must be an absolute path (or start with ~)")
-    CONFIG_FILE.write_text(json.dumps({"config_dir": str(p)}, indent=2) + "\n")
+        cfg.pop("config_dir", None)
+    else:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            raise ValueError("config dir must be an absolute path (or start with ~)")
+        cfg["config_dir"] = str(p)
+    write_cfg(cfg)
+
+
+def get_source(fname):
+    """Which copy of a config file is linked: 'claude' (shared) or a collection."""
+    src = read_cfg().get("sources", {}).get(fname, "claude")
+    return src if src == "claude" or src in collections() else "claude"
+
+
+def set_source(fname, source):
+    if fname not in CONFIG_FILES:
+        raise ValueError("unknown config file")
+    if source != "claude" and source not in collections():
+        raise ValueError(f"{source}: no such collection")
+    cfg = read_cfg()
+    sources = cfg.setdefault("sources", {})
+    if source == "claude":
+        sources.pop(fname, None)
+        if not sources:
+            cfg.pop("sources", None)
+    else:
+        sources[fname] = source
+    write_cfg(cfg)
+
+
+def mapping_repo(mid):
+    """Repo-side path for a mapping, honoring the selected file source."""
+    m = MAPPINGS[mid]
+    if m["kind"] == "dir":
+        return TYPES[mid]["root"]
+    src = get_source(mid)
+    base = REPO / "claude" if src == "claude" else REPO / src
+    return base / m["cfg"]
 
 
 def parse_frontmatter(text):
@@ -115,45 +189,77 @@ def is_group(entry):
             and not (entry / "SKILL.md").is_file())
 
 
-def group_names():
-    names = set()
-    for root in (SKILLS, SK_ARCHIVE):
-        if root.is_dir():
-            names.update(e.name for e in root.iterdir() if is_group(e))
-    return sorted(names)
+def skill_groups_map():
+    """Every skill grouping: nested groups and collections' skills dirs."""
+    m = {}
+    if SKILLS.is_dir():
+        for e in SKILLS.iterdir():
+            if is_group(e):
+                m[e.name] = e
+    for c in collections():
+        d = REPO / c / "skills"
+        if d.is_dir():
+            m[c] = d
+    return m
+
+
+def group_content_dir(g):
+    return skill_groups_map().get(g, SKILLS / g)
 
 
 def split_managed(name):
-    """'<g>-<x>' -> (g, x) if g is a known group (longest match), else None."""
-    for g in sorted(group_names(), key=len, reverse=True):
+    """'<g>-<x>' -> (g, x) if g is a known grouping (longest match), else None."""
+    names = set(skill_groups_map())
+    if SK_ARCHIVE.is_dir():
+        names.update(e.name for e in SK_ARCHIVE.iterdir() if is_group(e))
+    for g in sorted(names, key=len, reverse=True):
         if name.startswith(g + "-") and len(name) > len(g) + 1:
             return g, name[len(g) + 1:]
     return None
 
 
 def reconcile_links():
-    """Keep top-level <group>-<name> symlinks in sync with group contents."""
-    if not SKILLS.is_dir():
-        return
-    for entry in sorted(SKILLS.iterdir()):
-        if not is_group(entry):
-            continue
-        for d in sorted(entry.iterdir()):
-            if d.is_dir() and not d.name.startswith("."):
-                link = SKILLS / f"{entry.name}-{d.name}"
+    """Keep top-level <group>-<name> skill symlinks in sync with group and
+    collection contents, and <type>/<collection> dir symlinks for md types."""
+    if SKILLS.is_dir():
+        for g, d in skill_groups_map().items():
+            for x in sorted(d.iterdir()):
+                if x.is_dir() and not x.name.startswith("."):
+                    link = SKILLS / f"{g}-{x.name}"
+                    if not (link.exists() or link.is_symlink()):
+                        link.symlink_to(Path(os.path.relpath(x, SKILLS)))
+        for entry in SKILLS.iterdir():
+            if not entry.is_symlink():
+                continue
+            raw = entry.readlink()
+            target = raw if raw.is_absolute() else SKILLS / raw
+            try:
+                inside = target.resolve().is_relative_to(REPO.resolve())
+            except OSError:
+                inside = False
+            if inside and not target.exists():
+                entry.unlink()
+    for t in ("commands", "agents"):
+        root = TYPES[t]["root"]
+        for c in collections():
+            d = REPO / c / t
+            if d.is_dir():
+                root.mkdir(exist_ok=True)
+                link = root / c
                 if not (link.exists() or link.is_symlink()):
-                    link.symlink_to(Path(entry.name) / d.name)
-    for entry in SKILLS.iterdir():
-        if not entry.is_symlink():
-            continue
-        raw = entry.readlink()
-        target = raw if raw.is_absolute() else SKILLS / raw
-        try:
-            inside = target.resolve().is_relative_to(SKILLS.resolve())
-        except OSError:
-            inside = False
-        if inside and not target.exists():
-            entry.unlink()
+                    link.symlink_to(Path("..") / c / t)
+        if root.is_dir():
+            for e in root.iterdir():
+                if not e.is_symlink():
+                    continue
+                raw = e.readlink()
+                tgt = raw if raw.is_absolute() else root / raw
+                try:
+                    inside = tgt.resolve().is_relative_to(REPO.resolve())
+                except OSError:
+                    inside = False
+                if inside and not tgt.exists():
+                    e.unlink()
 
 
 def skill_item(entry, scope, name=None, group=None):
@@ -175,7 +281,13 @@ def scan_skills(root, scope):
     items = []
     if not root.is_dir():
         return items
-    root_res = root.resolve()
+    gmap = {}
+    if root == SKILLS:
+        for g, d in skill_groups_map().items():
+            try:
+                gmap[d.resolve()] = g
+            except OSError:
+                pass
     for entry in sorted(root.iterdir()):
         if entry.name.startswith("."):
             continue
@@ -199,9 +311,7 @@ def scan_skills(root, scope):
         group = None
         if entry.is_symlink():
             try:
-                rp = entry.resolve()
-                if rp.parent != root_res and rp.parent.parent == root_res:
-                    group = rp.parent.name
+                group = gmap.get(entry.resolve().parent)
             except OSError:
                 pass
         items.append(skill_item(entry, scope, group=group))
@@ -210,18 +320,18 @@ def scan_skills(root, scope):
 
 def skills_group_info():
     out = []
-    if not SKILLS.is_dir():
-        return out
-    for entry in sorted(SKILLS.iterdir()):
-        if not is_group(entry):
+    for g, d in sorted(skill_groups_map().items()):
+        if not d.is_dir():
             continue
-        members = [d for d in entry.iterdir() if d.is_dir() and not d.name.startswith(".")]
+        members = [x for x in d.iterdir() if x.is_dir() and not x.name.startswith(".")]
         out.append({
-            "name": entry.name,
+            "name": g,
             "members": len(members),
-            "incomplete": sum(1 for d in members if not (d / "SKILL.md").is_file()),
-            "loose_files": sum(1 for f in entry.iterdir()
+            "incomplete": sum(1 for x in members if not (x / "SKILL.md").is_file()),
+            "loose_files": sum(1 for f in d.iterdir()
                                if f.is_file() and not f.name.startswith(".")),
+            "removable": d.parent == SKILLS,
+            "collection": d.parent != SKILLS,
         })
     return out
 
@@ -238,17 +348,24 @@ def resolve_skill(scope, name):
 
 def skill_creation_path(name):
     sm = split_managed(name)
-    return SKILLS / sm[0] / sm[1] if sm else SKILLS / name
+    return group_content_dir(sm[0]) / sm[1] if sm else SKILLS / name
 
 
 # ---------------------------------------------------------------- md kinds (commands, agents)
 
 def md_rel(name):
-    """Validate a possibly-nested item name -> relative Path (no extension)."""
     parts = [p for p in (name or "").split("/") if p]
     if not parts or any(not NAME_RE.match(p) for p in parts):
         raise ValueError("bad name")
     return Path(*parts)
+
+
+def ensure_md_collection(type_, name):
+    """If `name` targets a collection, make sure its type dir + bridge exist."""
+    first = (name or "").split("/")[0]
+    if first in collections():
+        (REPO / first / type_).mkdir(exist_ok=True)
+        reconcile_links()
 
 
 def md_path(type_, scope, name):
@@ -259,48 +376,63 @@ def md_path(type_, scope, name):
 def scan_md(type_, scope):
     root = TYPES[type_]["root"] if scope == "active" else ARCHIVE / type_
     items = []
-    if not root.is_dir():
-        return items
-    for p in sorted(root.rglob("*.md")):
-        rel = p.relative_to(root)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        broken = p.is_symlink() and not p.exists()
-        meta = {} if broken else parse_frontmatter(p.read_text(errors="replace"))
-        group = str(rel.parent) if str(rel.parent) != "." else None
-        items.append({
-            "name": str(rel)[:-3], "scope": scope, "symlink": p.is_symlink(),
-            "group": group, "managed": False,
-            "local": (rel.parts[0] == "work") if group else False,
-            "broken": broken, "incomplete": False,
-            "description": ("(broken symlink: " + str(p.readlink()) + ")") if broken
-                           else meta.get("description", ""),
-            "path": str(p),
-            "movable": scope == "active" and not broken,
-        })
+
+    def walk(base, prefix, collection):
+        if not base.is_dir():
+            return
+        for p in sorted(base.rglob("*.md")):
+            rel = p.relative_to(base)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            full = str(Path(prefix) / rel)[:-3] if prefix else str(rel)[:-3]
+            broken = p.is_symlink() and not p.exists()
+            meta = {} if broken else parse_frontmatter(p.read_text(errors="replace"))
+            parent = str(Path(full).parent)
+            group = parent if parent != "." else None
+            items.append({
+                "name": full, "scope": scope, "symlink": p.is_symlink() and not collection,
+                "group": group, "managed": bool(collection),
+                "local": (group or "").split("/")[0] == "work",
+                "broken": broken, "incomplete": False,
+                "description": ("(broken symlink: " + str(p.readlink()) + ")") if broken
+                               else meta.get("description", ""),
+                "path": str(p),
+                "movable": scope == "active" and not broken,
+            })
+
+    walk(root, "", False)
+    if scope == "active":
+        for c in collections():
+            walk(REPO / c / type_, c, True)
     return items
 
 
 def md_group_info(type_):
     root = TYPES[type_]["root"]
     out = []
-    if not root.is_dir():
-        return out
-    for d in sorted(root.rglob("*")):
-        if not d.is_dir() or d.is_symlink():
-            continue
-        rel = d.relative_to(root)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
+
+    def count(d, name, removable, collection):
         mds = [f for f in d.iterdir() if f.name.endswith(".md")]
         out.append({
-            "name": str(rel),
-            "members": len(mds),
-            "incomplete": 0,
+            "name": name, "members": len(mds), "incomplete": 0,
             "loose_files": sum(1 for f in d.iterdir()
                                if f.is_file() and not f.name.endswith(".md")
                                and not f.name.startswith(".")),
+            "removable": removable, "collection": collection,
         })
+
+    if root.is_dir():
+        for d in sorted(root.rglob("*")):
+            if not d.is_dir() or d.is_symlink():
+                continue
+            rel = d.relative_to(root)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            count(d, str(rel), True, False)
+    for c in collections():
+        d = REPO / c / type_
+        if d.is_dir():
+            count(d, c, False, True)
     return out
 
 
@@ -315,23 +447,31 @@ def link_state():
     home = str(Path.home())
     rows = []
     for mid, m in MAPPINGS.items():
+        repo_side = mapping_repo(mid)
         target = cfg / m["cfg"]
         row = {"id": mid, "kind": m["kind"],
-               "repo": str(m["repo"].relative_to(REPO)),
+               "repo": str(repo_side.relative_to(REPO)),
                "target": str(target).replace(home, "~", 1),
-               "repo_exists": m["repo"].exists()}
+               "repo_exists": repo_side.exists()}
+        if m["kind"] == "file":
+            row["source"] = get_source(mid)
+            row["candidates"] = [
+                {"source": s, "exists": ((REPO / "claude" if s == "claude" else REPO / s)
+                                         / m["cfg"]).is_file()}
+                for s in ["claude"] + collections()
+            ]
         if target.is_symlink():
             try:
-                ok = target.resolve() == m["repo"].resolve()
+                ok = target.resolve() == repo_side.resolve()
             except OSError:
                 ok = False
             row["status"] = "linked" if ok else "elsewhere"
             if not ok:
-                row["points_to"] = str(target.readlink())
+                row["points_to"] = str(target.readlink()).replace(home, "~", 1)
         elif target.exists():
-            row["status"] = "real" if m["repo"].exists() else "adopt"
+            row["status"] = "real" if repo_side.exists() else "adopt"
         else:
-            row["status"] = "missing" if m["repo"].exists() else "absent"
+            row["status"] = "missing" if repo_side.exists() else "absent"
         rows.append(row)
     return rows
 
@@ -340,8 +480,8 @@ def do_link(mid):
     m = MAPPINGS.get(mid)
     if not m:
         raise ValueError("unknown link id")
+    repo_side = mapping_repo(mid)
     target = config_dir() / m["cfg"]
-    repo_side = m["repo"]
     target.parent.mkdir(parents=True, exist_ok=True)
     backup = adopted = None
     if target.is_symlink():
@@ -361,8 +501,8 @@ def do_link(mid):
             adopted = True
     if not repo_side.exists():
         if m["kind"] == "file":
-            raise ValueError(f"{m['repo'].name} doesn't exist in the repo or the "
-                             "config dir yet — nothing to link")
+            raise ValueError(f"{repo_side.relative_to(REPO)} doesn't exist in the "
+                             "repo or the config dir yet — nothing to link")
         repo_side.mkdir(parents=True, exist_ok=True)
     target.symlink_to(repo_side)
     return {"backup": str(backup) if backup else None, "adopted": bool(adopted)}
@@ -440,6 +580,23 @@ def classify_skill_upload(staged):
     return "group", len(skill_dirs)
 
 
+def is_collection_upload(staged):
+    return any(p.parts[0] in COLLECTION_MARKERS if len(p.parts) > 1
+               else p.parts[0] in CONFIG_FILES
+               for p, _ in staged)
+
+
+def normalize_collection_upload(staged):
+    for _ in range(8):
+        if is_collection_upload(staged):
+            return staged
+        tops = {p.parts[0] for p, _ in staged}
+        if len(tops) != 1 or any(len(p.parts) == 1 for p, _ in staged):
+            break
+        staged = [(Path(*p.parts[1:]), d) for p, d in staged]
+    return staged if is_collection_upload(staged) else None
+
+
 SKILL_TEMPLATE = """---
 name: {name}
 description: TODO — one sentence on what this does, then "Use when ..." triggers.
@@ -500,6 +657,10 @@ PAGE = """<!doctype html>
     padding: .5rem .75rem; border-radius: 6px; font: inherit;
   }
   input:focus { outline: none; border-color: var(--blue); }
+  select {
+    background: var(--bg1); color: var(--fg); border: 1px solid var(--bg2);
+    border-radius: 6px; padding: .2rem .4rem; font: inherit; font-size: .72rem;
+  }
   #links { border: 1px solid var(--bg2); border-radius: 8px; padding: .75rem .9rem; margin-bottom: 1.5rem; }
   #links summary { cursor: pointer; color: var(--fg2); font-size: .8rem;
     text-transform: uppercase; letter-spacing: .1em; }
@@ -545,6 +706,7 @@ PAGE = """<!doctype html>
   .groups { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
     margin: -.5rem 0 1.25rem; font-size: .75rem; color: var(--fg2); }
   .chip { border: 1px solid var(--bg2); border-radius: 99px; padding: .1rem .6rem; }
+  .chip.coll { border-color: var(--yellow); }
   .chip .warn { color: var(--red); }
   .chip a { color: var(--red); text-decoration: none; }
   #toast {
@@ -558,7 +720,7 @@ PAGE = """<!doctype html>
 </style>
 <main>
   <h1><span class="cfg" id="cfgprefix">~/.claude/</span>config</h1>
-  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Everything is plain files: review &amp; commit with git as usual.</p>
+  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Collections (like <b>work/</b>, gitignored) mirror the same shape and merge in automatically. Everything is plain files: review &amp; commit with git as usual.</p>
   <details id="links" open>
     <summary>links <span id="linksum"></span></summary>
     <div id="linkrows"></div>
@@ -573,7 +735,7 @@ PAGE = """<!doctype html>
   <div class="tabs" id="tabs"></div>
   <div class="bar">
     <input type="search" id="q" placeholder="filter…" autofocus>
-    <button onclick="newGroup()">+ group</button>
+    <button onclick="newGroup()">+ folder</button>
     <button onclick="document.getElementById('up').click()">⇪ folder</button>
     <button onclick="document.getElementById('upf').click()">⇪ files</button>
     <button class="primary" onclick="newItem()">+ new</button>
@@ -588,7 +750,7 @@ PAGE = """<!doctype html>
 </main>
 <div id="toast"></div>
 <script>
-let DATA = { types: {}, links: [], config_dir: "" };
+let DATA = { types: {}, links: [], config_dir: "", collections: [] };
 let TAB = "skills";
 
 async function api(path, body) {
@@ -632,8 +794,15 @@ function renderLinks() {
     const extra = l.points_to ? " (" + esc(l.points_to) + ")" : "";
     const canLink = l.status !== "linked" && l.status !== "absent";
     const canUnlink = l.status === "linked" || l.status === "elsewhere";
+    const src = l.candidates
+      ? `<select onchange="doSource('${l.id}', this.value)" title="which copy is linked">` +
+        l.candidates.map((c) =>
+          `<option value="${c.source}" ${c.source === l.source ? "selected" : ""}>` +
+          `${c.source === "claude" ? "shared" : esc(c.source)}${c.exists ? "" : " (none)"}</option>`).join("") +
+        "</select>"
+      : "";
     row.innerHTML =
-      `<span class="lname">${esc(l.target)}</span>` +
+      `<span class="lname">${esc(l.target)}</span>` + src +
       `<span class="lstat ${cls}">${txt}${extra} · repo: ${esc(l.repo)}${l.repo_exists ? "" : " (missing)"}</span>` +
       (canLink ? `<button class="small" onclick="doLink('${l.id}')">link</button>` : "") +
       (canUnlink ? `<button class="small danger" onclick="doUnlink('${l.id}')">unlink</button>` : "");
@@ -645,6 +814,14 @@ function renderLinks() {
   document.getElementById("cfgdir").placeholder = DATA.config_dir;
   document.getElementById("cfghint").textContent = DATA.default_dir
     ? "" : "non-default config dir: Claude Code only uses it if CLAUDE_CONFIG_DIR is exported in your shell";
+}
+
+async function doSource(id, source) {
+  try {
+    await api("/api/source", { id, source });
+    toast(id + " source → " + (source === "claude" ? "shared" : source));
+    await refresh();
+  } catch (e) { toast(e.message, true); await refresh(); }
 }
 
 async function doLink(id) {
@@ -695,15 +872,15 @@ function renderGroups() {
   el.textContent = "folders: ";
   for (const g of gs) {
     const chip = document.createElement("span");
-    chip.className = "chip";
+    chip.className = "chip" + (g.collection ? " coll" : "");
     let warn = "";
     if (!g.members) warn = "empty";
     else if (g.incomplete) warn = g.incomplete + " missing SKILL.md";
     if (g.loose_files) warn += (warn ? ", " : "") + g.loose_files + " loose files";
     chip.innerHTML =
-      esc(g.name) + "/ · " + g.members +
+      esc(g.name) + "/ · " + g.members + (g.collection ? " (collection)" : "") +
       (warn ? ' <span class="warn">⚠ ' + esc(warn) + "</span>" : "") +
-      (!g.members && !g.loose_files
+      (g.removable && !g.members && !g.loose_files
         ? ` <a href="#" onclick="removeGroup('${g.name}');return false" title="remove empty folder">×</a>`
         : "");
     el.appendChild(chip);
@@ -767,7 +944,7 @@ async function doAct(action, name) {
 async function moveToGroup(name) {
   const gs = (DATA.types[TAB] || {}).groups || [];
   const g = prompt(
-    "Move into folder — blank for top level" + (gs.length ? " (existing: " + gs.join(", ") + ")" : "") + ":", "");
+    "Move into folder/collection — blank for top level" + (gs.length ? " (existing: " + gs.join(", ") + ")" : "") + ":", "");
   if (g === null) return;
   try {
     const r = await api("/api/move", { type: TAB, name, group: g.trim() });
@@ -819,6 +996,24 @@ async function newItem() {
   } catch (e) { toast(e.message, true); }
 }
 
+async function encodeFiles(files, stripRoot) {
+  const payload = [];
+  for (const f of files) {
+    const rel = stripRoot
+      ? f.webkitRelativePath.split("/").slice(1).join("/")
+      : f.name;
+    if (!rel) continue;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = "";
+    for (const b of buf) bin += String.fromCharCode(b);
+    payload.push({ path: rel, content_b64: btoa(bin) });
+  }
+  return payload;
+}
+
+const COLLECTION_MARKS = ["skills/", "commands/", "agents/"];
+const CONFIG_FILE_NAMES = ["CLAUDE.md", "settings.json", "keybindings.json"];
+
 async function uploadItems(ev) {
   const files = [...ev.target.files].filter(
     (f) => !/(^|\\/)(\\.git|node_modules)(\\/|$)|(^|\\/)\\.DS_Store$/.test(f.webkitRelativePath)
@@ -826,20 +1021,29 @@ async function uploadItems(ev) {
   ev.target.value = "";
   if (!files.length) return;
   const root = files[0].webkitRelativePath.split("/")[0];
+  const rels = files.map((f) => f.webkitRelativePath.split("/").slice(1).join("/"));
+  const isCollection = rels.some((r) =>
+    COLLECTION_MARKS.some((m) => r.startsWith(m)) || CONFIG_FILE_NAMES.includes(r));
+  if (isCollection) {
+    const name = prompt(
+      "This folder looks like a whole Claude config (collection). Import as — 'work' stays out of git:", root);
+    if (!name) return;
+    try {
+      const payload = await encodeFiles(files, true);
+      const r = await api("/api/upload-collection", { name: name.trim(), files: payload });
+      toast("imported collection " + r.path + "/ — " +
+        r.skills + " skills, " + r.commands + " commands, " + r.agents + " agents" +
+        (r.config_files.length ? ", files: " + r.config_files.join(", ") : ""));
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+    return;
+  }
   const name = prompt(TAB === "skills"
     ? "Import as (a folder of skills becomes a group):"
     : "Import into folder (blank = top level):", TAB === "skills" ? root : "");
   if (name === null) return;
-  const payload = [];
-  for (const f of files) {
-    const rel = f.webkitRelativePath.split("/").slice(1).join("/");
-    if (!rel) continue;
-    const buf = new Uint8Array(await f.arrayBuffer());
-    let bin = "";
-    for (const b of buf) bin += String.fromCharCode(b);
-    payload.push({ path: rel, content_b64: btoa(bin) });
-  }
   try {
+    const payload = await encodeFiles(files, true);
     const r = await api("/api/upload", { type: TAB, name: name.trim(), files: payload });
     toast(r.kind === "group"
       ? "imported " + r.path + "/ as a group — " + r.skills + " skill" + (r.skills === 1 ? "" : "s") + " linked"
@@ -856,14 +1060,8 @@ async function uploadFiles(ev) {
     ? "Add file(s) to skill — an existing name, or a new one (a lone .md becomes its SKILL.md):"
     : "Into folder (blank = top level):", "");
   if (name === null) return;
-  const payload = [];
-  for (const f of files) {
-    const buf = new Uint8Array(await f.arrayBuffer());
-    let bin = "";
-    for (const b of buf) bin += String.fromCharCode(b);
-    payload.push({ path: f.name, content_b64: btoa(bin) });
-  }
   try {
+    const payload = await encodeFiles(files, false);
     const ep = TAB === "skills" ? "/api/upload-files" : "/api/upload";
     const r = await api(ep, { type: TAB, name: name.trim(), files: payload });
     toast(r.created
@@ -908,8 +1106,7 @@ class Handler(BaseHTTPRequestHandler):
                     types[t] = {
                         "active": scan_skills(SKILLS, "active"),
                         "archived": scan_skills(SK_ARCHIVE, "archived"),
-                        "groups": sorted(e.name for e in SKILLS.iterdir() if is_group(e))
-                                  if SKILLS.is_dir() else [],
+                        "groups": sorted(skill_groups_map()),
                         "group_info": skills_group_info(),
                     }
                 else:
@@ -923,8 +1120,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, {
                 "types": types,
                 "links": link_state(),
+                "collections": collections(),
                 "config_dir": str(config_dir()).replace(home, "~", 1),
-                "default_dir": not CONFIG_FILE.is_file() and not os.environ.get("CLAUDE_CONFIG_DIR"),
+                "default_dir": "config_dir" not in read_cfg()
+                               and not os.environ.get("CLAUDE_CONFIG_DIR"),
             })
         else:
             self.send(404, {"error": "not found"})
@@ -934,13 +1133,13 @@ class Handler(BaseHTTPRequestHandler):
         if action == "archive":
             src = resolve_skill("active", name)
             sm = split_managed(name)
-            if sm and src.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
+            if sm and src.is_symlink() and (group_content_dir(sm[0]) / sm[1]).is_dir():
                 g, x = sm
                 adir = SK_ARCHIVE / g
                 if (adir / x).exists():
                     raise ValueError(f"{name}: already exists in archive/skills/{g}/")
                 adir.mkdir(parents=True, exist_ok=True)
-                (SKILLS / g / x).rename(adir / x)
+                (group_content_dir(g) / x).rename(adir / x)
                 src.unlink()
             else:
                 if not (src.is_dir() or src.is_symlink()):
@@ -954,10 +1153,10 @@ class Handler(BaseHTTPRequestHandler):
             sm = split_managed(name)
             if sm and (SK_ARCHIVE / sm[0] / sm[1]).is_dir():
                 g, x = sm
-                gdir = SKILLS / g
+                gdir = group_content_dir(g)
                 if (gdir / x).exists():
-                    raise ValueError(f"{name}: already exists in skills/{g}/")
-                gdir.mkdir(exist_ok=True)
+                    raise ValueError(f"{name}: already exists in {g}/")
+                gdir.mkdir(parents=True, exist_ok=True)
                 (SK_ARCHIVE / g / x).rename(gdir / x)
                 reconcile_links()
             else:
@@ -974,8 +1173,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("bad scope")
             path = resolve_skill(scope, name)
             sm = split_managed(name)
-            root = SKILLS if scope == "active" else SK_ARCHIVE
-            content = root / sm[0] / sm[1] if sm else None
+            content = None
+            if sm:
+                content = (group_content_dir(sm[0]) if scope == "active"
+                           else SK_ARCHIVE / sm[0]) / sm[1]
             if scope == "active" and content and path.is_symlink() and content.is_dir():
                 path.unlink()
                 shutil.rmtree(content)
@@ -994,17 +1195,18 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("bad group name")
             entry = resolve_skill("active", name)
             sm = split_managed(name)
-            if sm and entry.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
-                src, link, base = SKILLS / sm[0] / sm[1], entry, sm[1]
+            if sm and entry.is_symlink() and (group_content_dir(sm[0]) / sm[1]).is_dir():
+                src, link, base = group_content_dir(sm[0]) / sm[1], entry, sm[1]
             elif entry.is_dir() and not entry.is_symlink():
                 src, link, base = entry, None, name
             else:
                 raise ValueError(f"{name}: only real skill dirs and group members can move")
             if dest_g:
-                gdir = SKILLS / dest_g
-                if not is_group(gdir):
-                    raise ValueError(f"{dest_g}: no such group (create it with + group)")
-                dst, new_name = gdir / base, f"{dest_g}-{base}"
+                gmap = skill_groups_map()
+                if dest_g not in gmap:
+                    raise ValueError(f"{dest_g}: no such group or collection "
+                                     "(create it with + folder)")
+                dst, new_name = gmap[dest_g] / base, f"{dest_g}-{base}"
                 taken = SKILLS / new_name
                 if taken.exists() or taken.is_symlink():
                     raise ValueError(f"{new_name}: name already taken")
@@ -1023,13 +1225,13 @@ class Handler(BaseHTTPRequestHandler):
             if not NAME_RE.match(name):
                 raise ValueError("bad group name")
             gdir = SKILLS / name
-            if gdir.exists() or gdir.is_symlink():
+            if gdir.exists() or gdir.is_symlink() or name in collections():
                 raise ValueError(f"{name}: already exists")
             gdir.mkdir()
         elif action == "group-remove":
             gdir = resolve_skill("active", name)
             if not is_group(gdir):
-                raise ValueError(f"{name}: not a group")
+                raise ValueError(f"{name}: not a removable folder")
             try:
                 gdir.rmdir()
             except OSError:
@@ -1051,8 +1253,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("single-file upload expects plain file names")
             entry = resolve_skill("active", name)
             sm = split_managed(name)
-            if sm and entry.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
-                dest, created = SKILLS / sm[0] / sm[1], False
+            if sm and entry.is_symlink() and (group_content_dir(sm[0]) / sm[1]).is_dir():
+                dest, created = group_content_dir(sm[0]) / sm[1], False
             elif entry.is_dir():
                 dest, created = entry, False
             else:
@@ -1094,7 +1296,6 @@ class Handler(BaseHTTPRequestHandler):
     def handle_md(self, type_, action, req):
         name = req.get("name", "")
         root = TYPES[type_]["root"]
-        aroot = ARCHIVE / type_
         if action == "archive":
             src = md_path(type_, "active", name)
             if not src.is_file():
@@ -1108,6 +1309,7 @@ class Handler(BaseHTTPRequestHandler):
             src = md_path(type_, "archived", name)
             if not src.is_file():
                 raise ValueError(f"{name}: not found")
+            ensure_md_collection(type_, name)
             dst = md_path(type_, "active", name)
             if dst.exists():
                 raise ValueError(f"{name}: already exists")
@@ -1118,9 +1320,7 @@ class Handler(BaseHTTPRequestHandler):
             if scope not in ("active", "archived"):
                 raise ValueError("bad scope")
             path = md_path(type_, scope, name)
-            if path.is_symlink():
-                path.unlink()
-            elif path.is_file():
+            if path.is_symlink() or path.is_file():
                 path.unlink()
             else:
                 raise ValueError(f"{name}: not found")
@@ -1131,8 +1331,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError(f"{name}: not found")
             base = md_rel(name).name
             new_name = f"{dest_g}/{base}" if dest_g else base
+            ensure_md_collection(type_, new_name)
             dst = md_path(type_, "active", new_name)
-            if dst == src:
+            if dst == src or (dst.exists() and dst.samefile(src)):
                 raise ValueError(f"{name}: already there")
             if dst.exists():
                 raise ValueError(f"{new_name}: already exists")
@@ -1140,19 +1341,23 @@ class Handler(BaseHTTPRequestHandler):
             src.rename(dst)
             return {"ok": True, "name": new_name}
         elif action == "group":
-            gdir = root / md_rel(name)
-            if gdir.exists():
-                raise ValueError(f"{name}: already exists")
-            gdir.mkdir(parents=True)
+            if name in collections():
+                ensure_md_collection(type_, name)
+            else:
+                gdir = root / md_rel(name)
+                if gdir.exists():
+                    raise ValueError(f"{name}: already exists")
+                gdir.mkdir(parents=True)
         elif action == "group-remove":
             gdir = root / md_rel(name)
             if not gdir.is_dir() or gdir.is_symlink():
-                raise ValueError(f"{name}: not a folder")
+                raise ValueError(f"{name}: not a removable folder")
             try:
                 gdir.rmdir()
             except OSError:
                 raise ValueError(f"{name}: not empty") from None
         elif action == "upload":
+            ensure_md_collection(type_, name)
             base = root / md_rel(name) if name else root
             staged = stage_upload(req.get("files"))
             if not any(p.suffix == ".md" for p, _ in staged):
@@ -1163,8 +1368,9 @@ class Handler(BaseHTTPRequestHandler):
             base.mkdir(parents=True, exist_ok=True)
             write_staged(staged, base)
             return {"ok": True, "files": len(staged),
-                    "path": str(base.relative_to(REPO))}
+                    "path": str(base.relative_to(REPO)) if base != root else type_}
         elif action == "new":
+            ensure_md_collection(type_, name)
             path = md_path(type_, "active", name)
             if path.exists():
                 raise ValueError(f"{name}: already exists")
@@ -1175,13 +1381,37 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("unknown action")
         return {"ok": True}
 
+    def handle_collection_upload(self, req):
+        name = req.get("name", "")
+        if not NAME_RE.match(name) or name in NON_COLLECTIONS:
+            raise ValueError("bad collection name")
+        dest = REPO / name
+        if dest.exists() or dest.is_symlink():
+            raise ValueError(f"{name}: already exists at the repo root")
+        staged = normalize_collection_upload(stage_upload(req.get("files")))
+        if staged is None:
+            raise ValueError(
+                "this doesn't look like a Claude config folder — expected "
+                "skills/, commands/, agents/, or CLAUDE.md/settings.json inside")
+        write_staged(staged, dest)
+        reconcile_links()
+        skills_n = sum(1 for d in (dest / "skills").iterdir()
+                       if d.is_dir() and (d / "SKILL.md").is_file()) \
+            if (dest / "skills").is_dir() else 0
+        cmd_n = len(list((dest / "commands").rglob("*.md"))) \
+            if (dest / "commands").is_dir() else 0
+        ag_n = len(list((dest / "agents").rglob("*.md"))) \
+            if (dest / "agents").is_dir() else 0
+        cfg_files = [f for f in CONFIG_FILES if (dest / f).is_file()]
+        return {"ok": True, "path": name, "skills": skills_n, "commands": cmd_n,
+                "agents": ag_n, "config_files": cfg_files}
+
     def do_POST(self):
         try:
             req = self.body()
             action = self.path.removeprefix("/api/")
             if action == "link":
-                r = do_link(req.get("id", ""))
-                self.send(200, {"ok": True, **r})
+                self.send(200, {"ok": True, **do_link(req.get("id", ""))})
                 return
             if action == "unlink":
                 do_unlink(req.get("id", ""))
@@ -1190,6 +1420,13 @@ class Handler(BaseHTTPRequestHandler):
             if action == "config-dir":
                 set_config_dir((req.get("path") or "").strip())
                 self.send(200, {"ok": True})
+                return
+            if action == "source":
+                set_source(req.get("id", ""), req.get("source", ""))
+                self.send(200, {"ok": True})
+                return
+            if action == "upload-collection":
+                self.send(200, self.handle_collection_upload(req))
                 return
             type_ = req.get("type", "skills")
             if type_ not in TYPES:
@@ -1209,11 +1446,34 @@ class Handler(BaseHTTPRequestHandler):
             self.send(400, {"error": str(e)})
 
 
+def migrate_legacy_work():
+    """Move pre-collection layout (skills/work/, commands/work/, agents/work/)
+    into the top-level work/ collection. Idempotent; never clobbers."""
+    for t in TYPES:
+        legacy = TYPES[t]["root"] / "work"
+        if not legacy.is_dir() or legacy.is_symlink():
+            continue
+        dest = REPO / "work" / t
+        dest.mkdir(parents=True, exist_ok=True)
+        for item in list(legacy.iterdir()):
+            tgt = dest / item.name
+            if not (tgt.exists() or tgt.is_symlink()):
+                item.rename(tgt)
+        try:
+            legacy.rmdir()
+            print(f"claude-ui: migrated {t}/work/ -> work/{t}/")
+        except OSError:
+            print(f"claude-ui: {t}/work/ partially migrated — "
+                  f"name clashes left behind in {legacy}")
+    reconcile_links()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=7333)
     ap.add_argument("--no-open", action="store_true", help="don't open a browser")
     args = ap.parse_args()
+    migrate_legacy_work()
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{args.port}"
     print(f"claude-ui: {url}  (repo: {REPO}, config dir: {config_dir()})")

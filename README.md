@@ -79,6 +79,24 @@ config dir: `skills/` (one directory per skill, each with a `SKILL.md`),
 `claude/` (`CLAUDE.md`, `settings.json`, `keybindings.json`, linked as
 individual files). A `git pull` updates everything in place.
 
+### Collections
+
+Any other top-level dir shaped like a Claude config — containing `skills/`,
+`commands/`, `agents/`, or the config files — is a **collection** (e.g.
+`work/`). Collections merge into the live config automatically: their
+skills get top-level `<collection>-<name>` links, their commands/agents get
+a `<type>/<collection>` dir symlink (so `work/commands/standup.md` is
+`/work:standup`), and their `CLAUDE.md`/`settings.json`/`keybindings.json`
+become selectable sources in the links panel — pick per machine which copy
+is the linked one, since Claude Code reads exactly one of each. A
+collection's `CLAUDE.md` can start with `@~/src/workspace/claude/CLAUDE.md`
+to import the shared memory instead of replacing it.
+
+The `work/` collection is gitignored wholesale — one private folder for all
+work config, easy to back up as its own repo or delete when leaving. Upload
+any config-shaped folder in the UI to add more collections; the old
+per-type `work` folders migrate into `work/` automatically at startup.
+
 ### Groups (nested folders)
 
 Skills can be organized into nested folders ("groups"): any directory under
