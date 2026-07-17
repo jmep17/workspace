@@ -1,5 +1,7 @@
 .serena/
 
-# Machine-local skills (e.g. work-specific) live in skills/ but stay uncommitted
-skills/work-*/
-archive/work-*/
+# The "work" group stays uncommitted: its content dir and its generated links
+skills/work/
+skills/work-*
+archive/work/
+archive/work-*
