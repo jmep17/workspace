@@ -8,6 +8,7 @@ each symlinked into `~/.config`. Domain language lives in
 nvim/      Neovim config (see nvim/README.md for details)
 tmux/      tmux.conf — C-a prefix, vi copy mode, gruvbox status line
 ghostty/   Ghostty config — gruvbox theme, ⌘-key tmux bindings
+fish/      fish config — local-only plugins, hand-rolled gruvbox prompt
 ```
 
 ## Fresh machine setup
@@ -18,7 +19,7 @@ if you clone elsewhere (e.g. on the work laptop).
 ### 1. Install the tools
 
 ```fish
-brew install neovim tmux fish ripgrep fzf lazygit fnm
+brew install neovim tmux fish ripgrep fzf fd bat lazygit fnm
 brew install --cask ghostty font-jetbrains-mono-nerd-font
 ```
 
@@ -31,6 +32,7 @@ git clone git@github.com:jmep17/workspace.git ~/src/workspace
 ln -s ~/src/workspace/nvim ~/.config/nvim
 ln -s ~/src/workspace/tmux ~/.config/tmux
 ln -s ~/src/workspace/ghostty ~/.config/ghostty
+ln -s ~/src/workspace/fish ~/.config/fish
 ```
 
 If a config directory already exists (a work machine may ship defaults),
@@ -43,6 +45,8 @@ move it aside first: `mv ~/.config/nvim ~/.config/nvim.bak`.
 - **Ghostty** reads `~/.config/ghostty/config` — reload with `cmd+shift+,`.
   Every window auto-attaches to the tmux session `main` (`command =` uses
   the Apple Silicon brew path; switch to `/usr/local/bin/tmux` on Intel).
+- **fish** reads `~/.config/fish` — after symlinking, bootstrap the plugin
+  set with fisher (one-time network fetch); see [`fish/README.md`](fish/README.md).
 
 ### 3. macOS settings (one-time, per machine)
 
