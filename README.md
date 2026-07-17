@@ -153,6 +153,17 @@ in-page **edit** button (JSON-validated for the `.json` ones), and a
 collapsed **how this works** panel at the top of the page documents the
 whole model and its limitations.
 
+The **statusline** tab composes Claude Code's status line: toggle any of
+19 fields (model, dir/project/repo, git branch with dirty marker, context
+remaining, tokens, cost, duration, lines ±, effort, thinking, vim mode,
+5h/7d rate limits, session name, PR, output style, version), reorder them
+with arrows, set the separator, and watch a live gruvbox preview. Saving
+generates `claude/statusline.sh` (a dependency-free Python script reading
+the documented stdin JSON) plus its `statusline.json` config; **save &
+apply** also sets `statusLine` in the selected settings.json. Link
+`statusline.sh` and `settings.json` in the links panel and every machine
+gets the same status line.
+
 The **settings** tab is a form editor for the selected `settings.json`
 source: every documented user-scope setting (from
 [the settings reference](https://code.claude.com/docs/en/settings)) rendered
