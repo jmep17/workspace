@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import sys
+import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -50,6 +51,7 @@ TYPES = {
     "skills": {"kind": "dir", "root": SKILLS},
     "commands": {"kind": "md", "root": REPO / "commands"},
     "agents": {"kind": "md", "root": REPO / "agents"},
+    "output-styles": {"kind": "md", "root": REPO / "output-styles"},
 }
 
 CONFIG_FILES = ("CLAUDE.md", "settings.json", "keybindings.json")
@@ -58,14 +60,19 @@ MAPPINGS = {
     "skills": {"cfg": "skills", "kind": "dir"},
     "commands": {"cfg": "commands", "kind": "dir"},
     "agents": {"cfg": "agents", "kind": "dir"},
+    "output-styles": {"cfg": "output-styles", "kind": "dir"},
     **{f: {"cfg": f, "kind": "file"} for f in CONFIG_FILES},
 }
 
 # top-level dirs that are never collections
 NON_COLLECTIONS = {"bin", "docs", "archive", "claude", "skills", "commands",
-                   "agents", "nvim", "tmux", "ghostty", "prompts"}
+                   "agents", "output-styles", "nvim", "tmux", "ghostty", "prompts"}
 
-COLLECTION_MARKERS = ("skills", "commands", "agents") + CONFIG_FILES
+COLLECTION_MARKERS = ("skills", "commands", "agents", "output-styles",
+                      "mcp-servers.json") + CONFIG_FILES
+
+MCP_FILE = "mcp-servers.json"
+CLAUDE_JSON = Path.home() / ".claude.json"  # user-scope mcpServers live here
 
 
 def collections():
@@ -239,7 +246,7 @@ def reconcile_links():
                 inside = False
             if inside and not target.exists():
                 entry.unlink()
-    for t in ("commands", "agents"):
+    for t in (n for n, s in TYPES.items() if s["kind"] == "md"):
         root = TYPES[t]["root"]
         for c in collections():
             d = REPO / c / t
@@ -801,6 +808,144 @@ def settings_state():
     return st
 
 
+def _read_json_object(path):
+    """(data, error) — data is {} on missing file; error set on bad JSON."""
+    if not path.is_file():
+        return {}, None
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        return {}, str(e)
+    return (data, None) if isinstance(data, dict) else ({}, "top level is not a JSON object")
+
+
+def mcp_repo_sources():
+    yield "claude", REPO / "claude" / MCP_FILE
+    for c in collections():
+        yield c, REPO / c / MCP_FILE
+
+
+def mcp_state():
+    machine_data, merr = _read_json_object(CLAUDE_JSON)
+    machine = machine_data.get("mcpServers", {})
+    if not isinstance(machine, dict):
+        machine, merr = {}, "mcpServers is not an object"
+    rows = {}
+    errors = []
+    for source, path in mcp_repo_sources():
+        data, err = _read_json_object(path)
+        if err:
+            errors.append(f"{path.relative_to(REPO)}: {err}")
+            continue
+        servers = data.get("mcpServers", {})
+        if isinstance(servers, dict):
+            for n, cfg in servers.items():
+                rows[n] = {"name": n, "source": source, "config": cfg}
+    out = []
+    for n, r in rows.items():
+        m = machine.get(n)
+        status = "repo-only" if m is None else ("applied" if m == r["config"] else "differs")
+        out.append({**r, "status": status,
+                    "machine_config": m if status == "differs" else None})
+    for n, cfg in machine.items():
+        if n not in rows:
+            out.append({"name": n, "source": None, "config": cfg, "status": "machine-only"})
+    out.sort(key=lambda r: r["name"])
+    home = str(Path.home())
+    return {"servers": out, "machine_path": str(CLAUDE_JSON).replace(home, "~", 1),
+            "machine_exists": CLAUDE_JSON.is_file(), "machine_error": merr,
+            "errors": errors}
+
+
+def validate_mcp_config(config):
+    if not isinstance(config, dict):
+        raise ValueError("server config must be a JSON object")
+    if not (config.get("command") or config.get("url")):
+        raise ValueError("server config needs a 'command' (stdio) or 'url' (http/sse/ws)")
+
+
+def mcp_write_repo(source, name, config):
+    """Set (or delete, config=None) a server in a repo-side mcp-servers.json."""
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad server name")
+    if source != "claude" and source not in collections():
+        raise ValueError(f"{source}: no such collection")
+    path = (REPO / "claude" if source == "claude" else REPO / source) / MCP_FILE
+    data, err = _read_json_object(path)
+    if err:
+        raise ValueError(f"{path.relative_to(REPO)}: {err} — fix it by hand first")
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"{path.relative_to(REPO)}: mcpServers is not an object")
+    if config is None:
+        servers.pop(name, None)
+        if not servers:
+            data.pop("mcpServers", None)
+    else:
+        validate_mcp_config(config)
+        servers[name] = config
+    if data:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n")
+    elif path.is_file():
+        path.unlink()
+
+
+def mcp_machine_set(name, config):
+    """Set (or remove, config=None) a server in ~/.claude.json mcpServers."""
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad server name")
+    data, err = _read_json_object(CLAUDE_JSON)
+    if err:
+        raise ValueError(f"~/.claude.json: {err} — refusing to touch it")
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("~/.claude.json: mcpServers is not an object")
+    if config is None:
+        servers.pop(name, None)
+        if not servers:
+            data.pop("mcpServers", None)
+    else:
+        validate_mcp_config(config)
+        servers[name] = config
+    CLAUDE_JSON.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def mcp_repo_config(name):
+    for source, path in mcp_repo_sources():
+        data, err = _read_json_object(path)
+        if err:
+            continue
+        servers = data.get("mcpServers", {})
+        if isinstance(servers, dict) and name in servers:
+            return servers[name]
+    raise ValueError(f"{name}: not defined in the repo")
+
+
+def file_read(mid):
+    if MAPPINGS.get(mid, {}).get("kind") != "file":
+        raise ValueError("not an editable config file")
+    path = mapping_repo(mid)
+    return {"id": mid, "path": str(path.relative_to(REPO)),
+            "exists": path.is_file(), "source": get_source(mid),
+            "content": path.read_text(errors="replace") if path.is_file() else ""}
+
+
+def file_save(mid, content):
+    if MAPPINGS.get(mid, {}).get("kind") != "file":
+        raise ValueError("not an editable config file")
+    if not isinstance(content, str) or len(content) > 2 * 1024 * 1024:
+        raise ValueError("bad content")
+    if mid.endswith(".json") and content.strip():
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"invalid JSON: {e}") from None
+    path = mapping_repo(mid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
 def settings_set(key, value):
     if not SETTINGS_KEY_RE.match(key or ""):
         raise ValueError("bad settings key")
@@ -864,7 +1009,16 @@ description: TODO — when to use this agent.
 TODO: system prompt for the agent.
 """
 
-TEMPLATES = {"commands": COMMAND_TEMPLATE, "agents": AGENT_TEMPLATE}
+OUTPUT_STYLE_TEMPLATE = """---
+name: {name}
+description: TODO — what this output style changes.
+---
+
+TODO: instructions that replace the default output style.
+"""
+
+TEMPLATES = {"commands": COMMAND_TEMPLATE, "agents": AGENT_TEMPLATE,
+             "output-styles": OUTPUT_STYLE_TEMPLATE}
 
 PAGE = """<!doctype html>
 <meta charset="utf-8">
@@ -965,6 +1119,23 @@ PAGE = """<!doctype html>
     font: inherit; font-size: .75rem; padding: .4rem .5rem; }
   .srow .sctrl textarea:focus { outline: none; border-color: var(--blue); }
   .sethead { color: var(--fg2); font-size: .8rem; margin-bottom: .75rem; }
+  .fedit { width: 100%; background: var(--bg1); border: 1px solid var(--bg2);
+    color: var(--fg); border-radius: 6px; font: inherit; font-size: .78rem;
+    padding: .6rem; }
+  .fedit:focus { outline: none; border-color: var(--blue); }
+  #help { border: 1px solid var(--bg2); border-radius: 8px;
+    padding: .6rem .9rem; margin-bottom: 1rem; }
+  #help summary { cursor: pointer; color: var(--fg2); font-size: .8rem;
+    text-transform: uppercase; letter-spacing: .1em; }
+  .helpbody { font-size: .8rem; color: var(--fg2); }
+  .helpbody p { margin: .6rem 0; }
+  .helpbody b, .helpbody code { color: var(--fg); }
+  .helpbody code { background: var(--bg1); padding: 0 .25rem; border-radius: 4px; }
+  .badge.ok { color: var(--green); border-color: var(--green); }
+  .mcppanel { border: 1px solid var(--bg2); border-radius: 8px;
+    padding: .75rem .9rem; margin-bottom: 1rem; }
+  .mcppanel .bar { margin-bottom: .6rem; }
+  .mcppanel input[type=text] { padding: .3rem .5rem; font-size: .78rem; }
   .sethead .warn { color: var(--orange); }
   .banner {
     padding: .55rem .75rem; border: 1px solid; border-radius: 6px;
@@ -993,7 +1164,51 @@ PAGE = """<!doctype html>
     </div>
     <div class="cfgdir hint" id="cfghint"></div>
   </details>
+  <details id="help">
+    <summary>how this works</summary>
+    <div class="helpbody">
+      <p><b>The repo is the source of truth; the config dir just points at it.</b>
+      Claude Code reads one config dir (<code>~/.claude</code> by default). The links
+      panel symlinks each piece of it — skills, commands, agents, output-styles,
+      CLAUDE.md, settings.json, keybindings.json — to files in this repo, so your
+      real config lives in git and a <code>git pull</code> updates every machine.</p>
+      <p><b>Importing an existing config:</b> setting "config dir" to a path does
+      NOT import anything by itself — it only chooses where the symlinks are
+      managed. But when a row shows "real", clicking <b>link</b> takes over that
+      content: if the repo side doesn't exist yet it is <i>adopted</i> (moved into
+      the repo, then symlinked back — commit it after); if the repo side already
+      exists, the old content is renamed to <code>*.bak</code> next to it and the
+      link replaces it. Alternatively, <b>⇪ folder</b>-upload any config-shaped
+      directory (containing skills/, commands/, CLAUDE.md, ...) to import it as a
+      <i>collection</i> without touching your live config.</p>
+      <p><b>Collections</b> are extra config sets at the repo root (e.g.
+      <code>work/</code>). Their skills/commands/agents/output-styles merge into the
+      live config automatically via generated symlinks (a collection command runs as
+      <code>/&lt;collection&gt;:&lt;name&gt;</code>; a collection skill loads as
+      <code>&lt;collection&gt;-&lt;name&gt;</code>). Config files can't merge — Claude
+      Code reads exactly one CLAUDE.md / settings.json — so each file row has a
+      <i>source</i> dropdown choosing which copy is linked on this machine.
+      <code>work/</code> is gitignored: private, one folder, never committed.</p>
+      <p><b>MCP servers</b> are different: Claude Code stores user-scope servers in
+      <code>~/.claude.json</code> (machine state, NOT inside the config dir, and not
+      affected by the config-dir setting). The mcp tab keeps server definitions
+      versioned in the repo (<code>claude/mcp-servers.json</code> or a collection's
+      copy) and <b>applies</b> them into <code>~/.claude.json</code> per machine;
+      machine-only servers can be adopted into the repo or removed.</p>
+      <p><b>Limitations:</b> a non-default config dir only takes effect if you
+      <code>export CLAUDE_CONFIG_DIR=...</code> in your shell — the UI can't do that
+      for you. Claude Code reads settings/CLAUDE.md at session start, so changes
+      apply to new sessions. Skills must be direct children of the skills dir
+      (that's why nested folders get generated links). Moving a skill into a
+      folder renames it (<code>tdd</code> → <code>ai-tdd</code>). Nothing here
+      touches project-level config (<code>.claude/</code>, <code>.mcp.json</code>
+      inside your projects). This page runs locally from your clone and edits
+      plain files — it never commits; review with git as usual.</p>
+    </div>
+  </details>
   <div class="tabs" id="tabs"></div>
+  <div id="editorview" hidden></div>
+  <div id="mcpview" hidden></div>
   <div id="settingsview" hidden></div>
   <div id="itemsview">
   <div class="bar">
@@ -1068,6 +1283,7 @@ function renderLinks() {
     row.innerHTML =
       `<span class="lname">${esc(l.target)}</span>` + src +
       `<span class="lstat ${cls}">${txt}${extra} · repo: ${esc(l.repo)}${l.repo_exists ? "" : " (missing)"}</span>` +
+      (l.kind === "file" ? `<button class="small" onclick="openEditor('${l.id}')">edit</button>` : "") +
       (canLink ? `<button class="small" onclick="doLink('${l.id}')">link</button>` : "") +
       (canUnlink ? `<button class="small danger" onclick="doUnlink('${l.id}')">unlink</button>` : "");
     box.appendChild(row);
@@ -1119,10 +1335,12 @@ async function resetCfgDir() {
 function renderTabs() {
   const el = document.getElementById("tabs");
   el.innerHTML = "";
-  for (const t of [...Object.keys(DATA.types), "settings"]) {
+  for (const t of [...Object.keys(DATA.types), "mcp", "settings"]) {
     const b = document.createElement("button");
     b.textContent = t === "settings"
       ? "settings · " + Object.keys((DATA.settings || {}).data || {}).length
+      : t === "mcp"
+      ? "mcp · " + ((DATA.mcp || {}).servers || []).length
       : t + " · " + DATA.types[t].active.length;
     b.className = t === TAB ? "on" : "";
     b.onclick = () => { TAB = t; location.hash = t; render(); };
@@ -1213,6 +1431,187 @@ function renderSettings() {
   }
 }
 
+let MCPEDIT = null;
+
+const MCP_TEMPLATE = {
+  stdio: { type: "stdio", command: "/path/to/server", args: [], env: {} },
+  http: { type: "http", url: "https://example.com/mcp", headers: {} },
+};
+
+function mcpSummary(cfg) {
+  if (!cfg || typeof cfg !== "object") return "?";
+  const t = cfg.type || (cfg.command ? "stdio" : cfg.url ? "http" : "?");
+  const what = cfg.command
+    ? cfg.command + (cfg.args && cfg.args.length ? " " + cfg.args.join(" ") : "")
+    : cfg.url || "";
+  return t + " · " + what;
+}
+
+function mcpEditPanel() {
+  const p = document.createElement("div");
+  p.className = "mcppanel";
+  const srcs = ["claude", ...(DATA.collections || [])];
+  p.innerHTML =
+    `<div class="bar"><input type="text" id="mcpname" placeholder="server name"` +
+    ` value="${esc(MCPEDIT.name || "")}" ${MCPEDIT.isNew ? "" : "disabled"}>` +
+    `<select id="mcpsource">` +
+    srcs.map((s) => `<option value="${s}" ${s === MCPEDIT.source ? "selected" : ""}>` +
+      `${s === "claude" ? "shared" : esc(s)}</option>`).join("") +
+    `</select><span style="flex:1"></span>` +
+    (MCPEDIT.isNew ? "" :
+      `<button class="small danger" onclick="mcpDelete()">delete from repo</button>`) +
+    `</div>`;
+  const ta = document.createElement("textarea");
+  ta.id = "mcpjson";
+  ta.className = "fedit";
+  ta.rows = 12;
+  ta.value = MCPEDIT.json;
+  p.appendChild(ta);
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.style.marginTop = ".6rem";
+  bar.innerHTML =
+    `<button class="primary" onclick="mcpSave()">save to repo</button>` +
+    `<button onclick="MCPEDIT=null;render()">cancel</button>`;
+  p.appendChild(bar);
+  return p;
+}
+
+async function mcpSave() {
+  let config;
+  try { config = JSON.parse(document.getElementById("mcpjson").value); }
+  catch (e) { toast("invalid JSON: " + e.message, true); return; }
+  const name = (document.getElementById("mcpname").value || "").trim();
+  const source = document.getElementById("mcpsource").value;
+  try {
+    await api("/api/mcp-save", { name, source, config,
+      orig_source: MCPEDIT.isNew ? null : MCPEDIT.source });
+    toast(name + " saved to " + (source === "claude" ? "shared" : source) +
+      " — use apply to activate on this machine");
+    MCPEDIT = null;
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function mcpDelete() {
+  const fromMachine = ["applied", "differs"].includes(MCPEDIT.status)
+    && confirm("Also remove " + MCPEDIT.name + " from this machine's ~/.claude.json?");
+  if (!confirm("Delete " + MCPEDIT.name + " from the repo definition?")) return;
+  try {
+    await api("/api/mcp-delete", { name: MCPEDIT.name, source: MCPEDIT.source, from_machine: fromMachine });
+    toast(MCPEDIT.name + " deleted");
+    MCPEDIT = null;
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function mcpApply(name) {
+  try {
+    const r = await api("/api/mcp-apply", { name });
+    toast(name === "*" ? r.applied + " server(s) applied to ~/.claude.json"
+      : name + " applied to ~/.claude.json");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function mcpRemoveMachine(name) {
+  if (!confirm("Remove " + name + " from this machine's ~/.claude.json? (repo definition, if any, is kept)")) return;
+  try {
+    await api("/api/mcp-remove-machine", { name });
+    toast(name + " removed from machine");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function mcpAdopt(name) {
+  const srcs = ["claude", ...(DATA.collections || [])];
+  let source = "claude";
+  if (srcs.length > 1) {
+    source = prompt("Adopt into which source? (" + srcs.map((s) => s === "claude" ? "shared" : s).join(", ") + ")", "shared");
+    if (source === null) return;
+    source = source.trim() === "shared" ? "claude" : source.trim();
+  }
+  try {
+    await api("/api/mcp-adopt", { name, source });
+    toast(name + " adopted into the repo — commit it" + (source === "work" ? " (gitignored: stays local)" : ""));
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+function mcpNew() {
+  const name = prompt("Server name:");
+  if (!name) return;
+  const kind = confirm("OK = stdio (local command), Cancel = http/sse (remote URL)") ? "stdio" : "http";
+  MCPEDIT = { name: name.trim(), source: "claude", isNew: true,
+    json: JSON.stringify(MCP_TEMPLATE[kind], null, 2) };
+  render();
+}
+
+function renderMcp() {
+  const el = document.getElementById("mcpview");
+  const st = DATA.mcp || { servers: [] };
+  let head =
+    `<div class="sethead">server definitions live in the repo (shared <b>claude/${esc("mcp-servers.json")}</b>` +
+    ` or a collection's copy) and are <b>applied</b> per machine into <b>${esc(st.machine_path)}</b>` +
+    ` — Claude Code's user-scope MCP store${st.machine_exists ? "" : " (created on first apply)"}.</div>`;
+  el.innerHTML = head;
+  if (st.machine_error) {
+    const b = document.createElement("div");
+    b.className = "banner warn";
+    b.textContent = "~/.claude.json has invalid JSON — machine actions disabled. " + st.machine_error;
+    el.appendChild(b);
+  }
+  for (const e of st.errors || []) {
+    const b = document.createElement("div");
+    b.className = "banner warn";
+    b.textContent = e;
+    el.appendChild(b);
+  }
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.innerHTML =
+    `<span style="flex:1"></span>` +
+    `<button onclick="mcpApply('*')">apply all</button>` +
+    `<button class="primary" onclick="mcpNew()">+ add server</button>`;
+  el.appendChild(bar);
+  if (MCPEDIT) el.appendChild(mcpEditPanel());
+  if (!st.servers.length) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = "no MCP servers defined or on this machine";
+    el.appendChild(d);
+    return;
+  }
+  const machineOk = !st.machine_error;
+  for (const s of st.servers) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const srcBadge = s.source
+      ? `<span class="badge group">${s.source === "claude" ? "shared" : esc(s.source)}</span>`
+      : "";
+    const statusBadge = {
+      applied: '<span class="badge ok">applied</span>',
+      "repo-only": '<span class="badge link">not on this machine</span>',
+      "machine-only": '<span class="badge local">machine only</span>',
+      differs: '<span class="badge warn">differs from machine</span>',
+    }[s.status] || "";
+    let actions = "";
+    if (s.source)
+      actions += `<button onclick='MCPEDIT={name:${JSON.stringify(s.name)},source:${JSON.stringify(s.source)},status:${JSON.stringify(s.status)},isNew:false,json:${JSON.stringify(JSON.stringify(s.config, null, 2))}};render()'>edit</button>`;
+    if (machineOk && s.source && (s.status === "repo-only" || s.status === "differs"))
+      actions += `<button onclick="mcpApply('${s.name}')">apply</button>`;
+    if (machineOk && (s.status === "machine-only" || s.status === "differs"))
+      actions += `<button onclick="mcpAdopt('${s.name}')">adopt</button>`;
+    if (machineOk && s.status !== "repo-only")
+      actions += `<button class="danger" onclick="mcpRemoveMachine('${s.name}')">remove from machine</button>`;
+    row.innerHTML =
+      `<span class="name">${esc(s.name)}</span>` + srcBadge + statusBadge +
+      `<span class="desc">${esc(mcpSummary(s.config))}</span>` +
+      `<span class="actions">${actions}</span>`;
+    el.appendChild(row);
+  }
+}
+
 async function saveSetting(key, type, raw) {
   let value = null;
   try {
@@ -1268,13 +1667,67 @@ function renderGroups() {
   }
 }
 
+let EDITING = null;
+
+async function openEditor(id) {
+  try {
+    EDITING = await api("/api/file?id=" + encodeURIComponent(id));
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderEditor() {
+  const el = document.getElementById("editorview");
+  const f = EDITING;
+  el.innerHTML =
+    `<div class="sethead">editing <b>${esc(f.path)}</b>` +
+    ` (source: ${f.source === "claude" ? "shared" : esc(f.source)}${f.exists ? "" : ", new file"})</div>`;
+  const ta = document.createElement("textarea");
+  ta.id = "fileeditor";
+  ta.rows = 24;
+  ta.className = "fedit";
+  ta.value = f.content;
+  el.appendChild(ta);
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.style.marginTop = ".75rem";
+  bar.innerHTML =
+    `<button class="primary" onclick="saveFile()">save</button>` +
+    `<button onclick="closeEditor()">close</button>`;
+  el.appendChild(bar);
+}
+
+async function saveFile() {
+  try {
+    await api("/api/file-save", { id: EDITING.id, content: document.getElementById("fileeditor").value });
+    toast(EDITING.path + " saved");
+    EDITING.exists = true;
+  } catch (e) { toast(e.message, true); }
+}
+
+function closeEditor() {
+  EDITING = null;
+  refresh();
+}
+
 function render() {
   renderLinks();
   renderTabs();
+  const isEditor = !!EDITING;
+  document.getElementById("editorview").hidden = !isEditor;
+  if (isEditor) {
+    document.getElementById("itemsview").hidden = true;
+    document.getElementById("settingsview").hidden = true;
+    renderEditor();
+    return;
+  }
   const isSettings = TAB === "settings";
-  document.getElementById("itemsview").hidden = isSettings;
+  const isMcp = TAB === "mcp";
+  document.getElementById("itemsview").hidden = isSettings || isMcp;
   document.getElementById("settingsview").hidden = !isSettings;
+  document.getElementById("mcpview").hidden = !isMcp;
   if (isSettings) { renderSettings(); return; }
+  if (isMcp) { renderMcp(); return; }
   renderGroups();
   const q = document.getElementById("q").value.toLowerCase();
   const data = DATA.types[TAB] || { active: [], archived: [] };
@@ -1316,7 +1769,7 @@ const SCHEMA = __SCHEMA__;
 
 async function refresh() {
   DATA = await api("/api/state");
-  if (TAB !== "settings" && !DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
+  if (!["settings", "mcp"].includes(TAB) && !DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
   render();
 }
 
@@ -1509,11 +1962,18 @@ class Handler(BaseHTTPRequestHandler):
                 "types": types,
                 "links": link_state(),
                 "settings": settings_state(),
+                "mcp": mcp_state(),
                 "collections": collections(),
                 "config_dir": str(config_dir()).replace(home, "~", 1),
                 "default_dir": "config_dir" not in read_cfg()
                                and not os.environ.get("CLAUDE_CONFIG_DIR"),
             })
+        elif self.path.startswith("/api/file?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                self.send(200, file_read((q.get("id") or [""])[0]))
+            except ValueError as e:
+                self.send(400, {"error": str(e)})
         else:
             self.send(404, {"error": "not found"})
 
@@ -1819,6 +2279,51 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if action == "settings-set":
                 settings_set(req.get("key", ""), req.get("value"))
+                self.send(200, {"ok": True})
+                return
+            if action == "file-save":
+                file_save(req.get("id", ""), req.get("content", ""))
+                self.send(200, {"ok": True})
+                return
+            if action == "mcp-save":
+                name = req.get("name", "")
+                mcp_write_repo(req.get("source", "claude"), name, req.get("config"))
+                orig = req.get("orig_source")
+                if orig and orig != req.get("source"):
+                    mcp_write_repo(orig, name, None)
+                self.send(200, {"ok": True})
+                return
+            if action == "mcp-delete":
+                mcp_write_repo(req.get("source", "claude"), req.get("name", ""), None)
+                if req.get("from_machine"):
+                    mcp_machine_set(req.get("name", ""), None)
+                self.send(200, {"ok": True})
+                return
+            if action == "mcp-apply":
+                name = req.get("name", "")
+                if name == "*":
+                    applied = 0
+                    for row in mcp_state()["servers"]:
+                        if row["source"] and row["status"] in ("repo-only", "differs"):
+                            mcp_machine_set(row["name"], row["config"])
+                            applied += 1
+                    self.send(200, {"ok": True, "applied": applied})
+                else:
+                    mcp_machine_set(name, mcp_repo_config(name))
+                    self.send(200, {"ok": True})
+                return
+            if action == "mcp-remove-machine":
+                mcp_machine_set(req.get("name", ""), None)
+                self.send(200, {"ok": True})
+                return
+            if action == "mcp-adopt":
+                st = mcp_state()
+                row = next((r for r in st["servers"]
+                            if r["name"] == req.get("name") and r["status"] in ("machine-only", "differs")), None)
+                if row is None:
+                    raise ValueError(f"{req.get('name')}: nothing to adopt from this machine")
+                cfg = row["machine_config"] if row["status"] == "differs" else row["config"]
+                mcp_write_repo(req.get("source", "claude"), req.get("name", ""), cfg)
                 self.send(200, {"ok": True})
                 return
             type_ = req.get("type", "skills")
