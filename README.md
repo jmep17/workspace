@@ -41,6 +41,8 @@ move it aside first: `mv ~/.config/nvim ~/.config/nvim.bak`.
 - **tmux** ≥ 3.1 reads `~/.config/tmux/tmux.conf` natively — no `~/.tmux.conf`
   needed. Reload a running server with `prefix r`.
 - **Ghostty** reads `~/.config/ghostty/config` — reload with `cmd+shift+,`.
+  Every window auto-attaches to the tmux session `main` (`command =` uses
+  the Apple Silicon brew path; switch to `/usr/local/bin/tmux` on Intel).
 
 ### 3. macOS settings (one-time, per machine)
 

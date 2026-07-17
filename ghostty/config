@@ -55,6 +55,12 @@ keybind = cmd+physical:nine=text:\x019
 # from inside tmux with prefix x instead.
 
 # ── Behavior ─────────────────────────────────────────────────────────
+# Every surface starts tmux, attaching to (or creating) session "main" —
+# so ⌘N/⌘T mirror that session; detach (prefix d) to close a window
+# without killing it. Full path because Ghostty launches without brew's
+# PATH; on an Intel Mac use /usr/local/bin/tmux instead.
+command = /opt/homebrew/bin/tmux new-session -A -s main
+
 # Ghostty auto-detects fish and injects shell integration.
 shell-integration = detect
 shell-integration-features = cursor,sudo,title
