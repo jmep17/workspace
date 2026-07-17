@@ -139,6 +139,20 @@ Uploading a folder of skill folders (no top-level `SKILL.md`) imports it as
 a whole group; naming a skill upload or scaffold `<group>-<name>` files it
 into that group.
 
+The **mcp** tab manages MCP servers. Claude Code stores user-scope servers
+in `~/.claude.json` (machine state, outside the config dir), so the tab
+keeps *definitions* versioned in the repo (`claude/mcp-servers.json`, or a
+collection's copy — `work/mcp-servers.json` stays gitignored) and applies
+them per machine: apply / apply-all writes into `~/.claude.json`, adopt
+pulls a machine-configured server into the repo, and drift shows as a
+"differs" badge. Direct JSON editing per server, stdio and http/sse
+templates included.
+
+`output-styles/` is managed like commands/agents, config files get an
+in-page **edit** button (JSON-validated for the `.json` ones), and a
+collapsed **how this works** panel at the top of the page documents the
+whole model and its limitations.
+
 The **settings** tab is a form editor for the selected `settings.json`
 source: every documented user-scope setting (from
 [the settings reference](https://code.claude.com/docs/en/settings)) rendered
