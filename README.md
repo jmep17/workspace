@@ -153,16 +153,25 @@ in-page **edit** button (JSON-validated for the `.json` ones), and a
 collapsed **how this works** panel at the top of the page documents the
 whole model and its limitations.
 
-The **statusline** tab composes Claude Code's status line: toggle any of
-19 fields (model, dir/project/repo, git branch with dirty marker, context
-remaining, tokens, cost, duration, lines ±, effort, thinking, vim mode,
-5h/7d rate limits, session name, PR, output style, version), reorder them
-with arrows, set the separator, and watch a live gruvbox preview. Saving
-generates `claude/statusline.sh` (a dependency-free Python script reading
-the documented stdin JSON) plus its `statusline.json` config; **save &
-apply** also sets `statusLine` in the selected settings.json. Link
-`statusline.sh` and `settings.json` in the links panel and every machine
-gets the same status line.
+The **statusline** tab composes Claude Code's status line: toggle any
+field from the documented stdin schema (model name/id, dir/project/repo,
+added dirs, git branch with dirty marker, worktree, context
+left/used/size, session and last-call tokens with cache reads, session
+cost, cost today / last 7 days / this month via `ccusage`, duration, API
+time, lines ±, effort, thinking, vim mode, 5h/7d rate limits and their
+reset times, session name/id, agent, PR, output style, version), reorder
+with arrows, set the separator, insert **line break** entries for
+multi-line layouts, and watch a live gruvbox preview. Saving generates
+`claude/statusline.sh` (a dependency-free Python script reading the
+documented stdin JSON) plus its `statusline.json` config; **save &
+apply** also sets `statusLine` in the selected settings.json — with an
+optional `refreshInterval` so the line updates every N seconds while the
+session is idle (script and settings edits are otherwise picked up on the
+next interaction; a restart is never needed). Branch/repo only render
+inside an actual git work tree, and the historical cost fields cache
+`ccusage` output for 5 minutes, refreshed in the background so the status
+line never blocks. Link `statusline.sh` and `settings.json` in the links
+panel and every machine gets the same status line.
 
 The **settings** tab is a form editor for the selected `settings.json`
 source: every documented user-scope setting (from
