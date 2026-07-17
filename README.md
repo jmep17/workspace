@@ -139,6 +139,16 @@ Uploading a folder of skill folders (no top-level `SKILL.md`) imports it as
 a whole group; naming a skill upload or scaffold `<group>-<name>` files it
 into that group.
 
+The **settings** tab is a form editor for the selected `settings.json`
+source: every documented user-scope setting (from
+[the settings reference](https://code.claude.com/docs/en/settings)) rendered
+as a toggle, dropdown, list, or JSON editor, grouped by category — model,
+permissions, env & hooks, interface, git, memory, MCP, sandbox, system.
+Set values are badged and clearable; keys not in the schema are still
+editable as raw JSON; unknown values never get clobbered. Changes write
+straight to the file (created on first set), so they take effect once
+`settings.json` is linked.
+
 ## Keybinding model
 
 Three layers, each owning what it's best at:

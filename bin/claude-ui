@@ -597,6 +597,248 @@ def normalize_collection_upload(staged):
     return staged if is_collection_upload(staged) else None
 
 
+# User-scope settings.json keys, from https://code.claude.com/docs/en/settings
+# (types: bool, string, number, enum, list, kv, json)
+SETTINGS_SCHEMA = [
+    {"key": "model", "type": "string", "cat": "model",
+     "desc": "Model for the main session — alias (opus, sonnet, haiku) or full model ID; read at startup"},
+    {"key": "fallbackModel", "type": "list", "cat": "model",
+     "desc": "Fallback model chain, max 3 models"},
+    {"key": "effortLevel", "type": "enum", "values": ["low", "medium", "high", "xhigh"], "cat": "model",
+     "desc": "Persist reasoning effort level across sessions"},
+    {"key": "alwaysThinkingEnabled", "type": "bool", "cat": "model",
+     "desc": "Enable extended thinking by default"},
+    {"key": "thinkingBudgetTokens", "type": "number", "cat": "model",
+     "desc": "Token budget for extended thinking when always-thinking is on"},
+    {"key": "advisorModel", "type": "string", "cat": "model",
+     "desc": "Model for the server-side advisor tool; unset to disable"},
+    {"key": "fastMode", "type": "bool", "cat": "model",
+     "desc": "Enable fast mode for sessions where available"},
+    {"key": "fastModePerSessionOptIn", "type": "bool", "cat": "model",
+     "desc": "Require per-session opt-in for fast mode"},
+
+    {"key": "permissions.defaultMode", "type": "enum", "cat": "permissions",
+     "values": ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"],
+     "desc": "Default permission mode: prompt on first use / auto-accept edits / read-only plan / auto with safety checks / deny unless pre-approved / skip prompts"},
+    {"key": "permissions.allow", "type": "list", "cat": "permissions",
+     "desc": "Rules to auto-approve, e.g. Bash(npm run test *)"},
+    {"key": "permissions.ask", "type": "list", "cat": "permissions",
+     "desc": "Rules that always require confirmation"},
+    {"key": "permissions.deny", "type": "list", "cat": "permissions",
+     "desc": "Rules to block, e.g. Read(./.env)"},
+    {"key": "permissions.additionalDirectories", "type": "list", "cat": "permissions",
+     "desc": "Extra directories Claude may access (like --add-dir)"},
+    {"key": "permissions.disableBypassPermissionsMode", "type": "enum", "values": ["disable"], "cat": "permissions",
+     "desc": "Set to 'disable' to prevent bypassPermissions mode"},
+
+    {"key": "env", "type": "kv", "cat": "environment & hooks",
+     "desc": "Environment variables applied to every session and subprocess"},
+    {"key": "hooks", "type": "json", "cat": "environment & hooks",
+     "desc": "Lifecycle hooks (SessionStart, PreToolUse, PostToolUse, Stop, ...) — see docs/en/hooks"},
+    {"key": "disableAllHooks", "type": "bool", "cat": "environment & hooks",
+     "desc": "Disable all hooks and custom status line"},
+    {"key": "statusLine", "type": "json", "cat": "environment & hooks",
+     "desc": "Custom status line, e.g. {\"type\": \"command\", \"command\": \"~/bin/statusline\"}"},
+
+    {"key": "editorMode", "type": "enum", "values": ["normal", "vim"], "default": "normal", "cat": "interface",
+     "desc": "Key binding mode for the input prompt"},
+    {"key": "tui", "type": "enum", "values": ["classic", "fullscreen", "auto"], "cat": "interface",
+     "desc": "TUI renderer mode"},
+    {"key": "interfaceLanguage", "type": "string", "cat": "interface",
+     "desc": "Interface language, e.g. en, ja, fr"},
+    {"key": "outputStyle", "type": "string", "cat": "interface",
+     "desc": "Output rendering style (read at startup)"},
+    {"key": "spinnerTipsEnabled", "type": "bool", "default": True, "cat": "interface",
+     "desc": "Show tips while waiting for the model"},
+    {"key": "autoScrollEnabled", "type": "bool", "default": True, "cat": "interface",
+     "desc": "Follow new output to the bottom in fullscreen rendering"},
+    {"key": "strikethrough", "type": "bool", "default": True, "cat": "interface",
+     "desc": "Show strikethrough for deleted text"},
+    {"key": "awaySummaryEnabled", "type": "bool", "default": True, "cat": "interface",
+     "desc": "One-line session recap when returning after time away"},
+    {"key": "interactiveEditingEnabled", "type": "bool", "default": True, "cat": "interface",
+     "desc": "Inline editing UI for applying changes"},
+    {"key": "askUserQuestionTimeout", "type": "enum", "values": ["60s", "5m", "10m", "never"],
+     "default": "never", "cat": "interface",
+     "desc": "Idle time before unanswered question dialogs auto-continue"},
+    {"key": "axScreenReader", "type": "bool", "cat": "interface",
+     "desc": "Screen-reader friendly flat text output"},
+    {"key": "showHiddenFiles", "type": "bool", "default": False, "cat": "interface",
+     "desc": "Show hidden files in file operations"},
+    {"key": "keyBindings", "type": "json", "cat": "interface",
+     "desc": "Custom keybindings for the input prompt"},
+    {"key": "fileSuggestion", "type": "json", "cat": "interface",
+     "desc": "Custom script for @-file autocomplete: {\"type\": \"command\", \"command\": \"...\"}"},
+
+    {"key": "attribution.commit", "type": "string", "cat": "git",
+     "desc": "Custom commit attribution string"},
+    {"key": "attribution.pr", "type": "string", "cat": "git",
+     "desc": "Custom PR attribution string"},
+    {"key": "gitAttributionName", "type": "string", "cat": "git",
+     "desc": "Name for commits/PRs when different from git config"},
+    {"key": "gitAttributionEmail", "type": "string", "cat": "git",
+     "desc": "Email for commits/PRs when different from git config"},
+    {"key": "includeCoAuthoredBy", "type": "bool", "cat": "git",
+     "desc": "Co-authored-by trailer in commits (older versions; superseded by attribution)"},
+
+    {"key": "autoMemoryEnabled", "type": "bool", "default": True, "cat": "memory & context",
+     "desc": "Auto memory: Claude reads and writes its memory directory"},
+    {"key": "autoMemoryDirectory", "type": "string", "cat": "memory & context",
+     "desc": "Custom auto-memory directory (absolute or ~/ path)"},
+    {"key": "claudeMdExcludes", "type": "list", "cat": "memory & context",
+     "desc": "Glob patterns of CLAUDE.md files to skip"},
+    {"key": "autoCompactEnabled", "type": "bool", "default": True, "cat": "memory & context",
+     "desc": "Auto-compact conversation near the context limit"},
+    {"key": "maxCompactMessages", "type": "number", "cat": "memory & context",
+     "desc": "Max messages to compact in one operation"},
+    {"key": "sessionHistorySize", "type": "number", "cat": "memory & context",
+     "desc": "Max messages retained in session history"},
+    {"key": "cleanupPeriodDays", "type": "number", "default": 30, "cat": "memory & context",
+     "desc": "Days before session files auto-delete (min 1)"},
+
+    {"key": "enableAllProjectMcpServers", "type": "bool", "cat": "mcp & plugins",
+     "desc": "Auto-approve every MCP server in project .mcp.json"},
+    {"key": "enabledMcpjsonServers", "type": "list", "cat": "mcp & plugins",
+     "desc": "Specific .mcp.json servers to approve"},
+    {"key": "disabledMcpjsonServers", "type": "list", "cat": "mcp & plugins",
+     "desc": "Specific .mcp.json servers to reject"},
+    {"key": "mcpServerTimeouts", "type": "json", "cat": "mcp & plugins",
+     "desc": "Per-server timeouts in seconds, e.g. {\"github\": 30}"},
+    {"key": "pluginMarketplaces", "type": "list", "cat": "mcp & plugins",
+     "desc": "Custom plugin marketplace sources"},
+    {"key": "skillOverrides", "type": "json", "cat": "mcp & plugins",
+     "desc": "Per-skill visibility: {\"skill-name\": \"on|name-only|user-invocable-only|off\"}"},
+    {"key": "disableBundledSkills", "type": "bool", "cat": "mcp & plugins",
+     "desc": "Disable bundled skills and workflows"},
+    {"key": "disableClaudeAiConnectors", "type": "bool", "cat": "mcp & plugins",
+     "desc": "Disable auto-fetch of claude.ai MCP connectors"},
+
+    {"key": "sandbox", "type": "json", "cat": "sandbox & security",
+     "desc": "Sandbox config: {\"enabled\": true, \"filesystem\": {...}, \"network\": {...}}"},
+    {"key": "warningOnSandboxEscape", "type": "bool", "default": True, "cat": "sandbox & security",
+     "desc": "Warn when processes escape the sandbox"},
+    {"key": "disableSkillShellExecution", "type": "bool", "cat": "sandbox & security",
+     "desc": "Disable inline shell execution in skills/commands"},
+    {"key": "invalidSSLWarning", "type": "bool", "cat": "sandbox & security",
+     "desc": "Warn about self-signed certificates"},
+    {"key": "apiKeyHelper", "type": "string", "cat": "sandbox & security",
+     "desc": "Command generating an auth value (sent as X-Api-Key / Authorization)"},
+    {"key": "awsAuthRefresh", "type": "string", "cat": "sandbox & security",
+     "desc": "Script refreshing AWS credentials (.aws directory)"},
+    {"key": "awsCredentialExport", "type": "string", "cat": "sandbox & security",
+     "desc": "Script printing JSON with AWS credentials"},
+    {"key": "proxy", "type": "json", "cat": "sandbox & security",
+     "desc": "HTTP proxy configuration"},
+    {"key": "autoMode", "type": "json", "cat": "sandbox & security",
+     "desc": "Auto-mode classifier rules: environment/allow/soft_deny/hard_deny arrays"},
+
+    {"key": "autoUpdatesChannel", "type": "enum", "values": ["latest", "stable"],
+     "default": "latest", "cat": "system",
+     "desc": "Release channel for auto-updates"},
+    {"key": "defaultShell", "type": "enum", "values": ["bash", "powershell"], "cat": "system",
+     "desc": "Shell for input-box ! commands"},
+    {"key": "restartOnConfigChange", "type": "bool", "cat": "system",
+     "desc": "Restart session when config files change"},
+    {"key": "telemetryEnabled", "type": "bool", "cat": "system",
+     "desc": "Telemetry collection"},
+    {"key": "verboseLogging", "type": "bool", "default": False, "cat": "system",
+     "desc": "Verbose logging output"},
+    {"key": "fileCheckpointingEnabled", "type": "bool", "default": True, "cat": "system",
+     "desc": "Snapshot files before edits for /rewind"},
+    {"key": "workspaceInitScript", "type": "string", "cat": "system",
+     "desc": "Script run when opening a new workspace"},
+    {"key": "skipFirstRunQuestions", "type": "bool", "cat": "system",
+     "desc": "Skip first-run setup questions"},
+    {"key": "ignoreGitignore", "type": "bool", "cat": "system",
+     "desc": "Ignore .gitignore when searching files"},
+    {"key": "llmConnectionTimeout", "type": "number", "cat": "system",
+     "desc": "Model connection timeout (seconds)"},
+    {"key": "llmRequestTimeout", "type": "number", "cat": "system",
+     "desc": "Overall model request timeout (seconds)"},
+    {"key": "feedbackSurveyRate", "type": "number", "cat": "system",
+     "desc": "Probability 0–1 of the session quality survey"},
+    {"key": "disableAgentView", "type": "bool", "cat": "system",
+     "desc": "Disable background agents, agent view, supervisor"},
+    {"key": "disableArtifact", "type": "bool", "cat": "system",
+     "desc": "Disable the Artifact tool (publishes to claude.ai)"},
+    {"key": "disableRemoteControl", "type": "bool", "cat": "system",
+     "desc": "Disable Remote Control"},
+    {"key": "disableWorkflows", "type": "bool", "default": False, "cat": "system",
+     "desc": "Disable dynamic workflows and bundled workflow commands"},
+    {"key": "agentPushNotifEnabled", "type": "bool", "default": False, "cat": "system",
+     "desc": "Proactive push notifications when Remote Control is connected"},
+    {"key": "autoUpdatesChannel", "type": "enum", "values": ["latest", "stable"], "default": "latest",
+     "cat": "system", "desc": "Release channel for auto-updates"},
+]
+# dedupe (keep first occurrence)
+_seen = set()
+SETTINGS_SCHEMA = [s for s in SETTINGS_SCHEMA
+                   if not (s["key"] in _seen or _seen.add(s["key"]))]
+
+SETTINGS_KEY_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$-]*$")
+
+
+def settings_state():
+    path = mapping_repo("settings.json")
+    target = config_dir() / "settings.json"
+    linked = False
+    if target.is_symlink():
+        try:
+            linked = target.resolve() == path.resolve()
+        except OSError:
+            pass
+    st = {"path": str(path.relative_to(REPO)), "source": get_source("settings.json"),
+          "exists": path.is_file(), "linked": linked, "data": {}, "error": None}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                st["data"] = data
+            else:
+                st["error"] = "top level is not a JSON object"
+        except json.JSONDecodeError as e:
+            st["error"] = str(e)
+    return st
+
+
+def settings_set(key, value):
+    if not SETTINGS_KEY_RE.match(key or ""):
+        raise ValueError("bad settings key")
+    path = mapping_repo("settings.json")
+    data = {}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path.name} has invalid JSON — fix it by hand first ({e})")
+        if not isinstance(data, dict):
+            raise ValueError(f"{path.name}: top level is not a JSON object")
+    parts = key.split(".")
+    node = data
+    for p in parts[:-1]:
+        nxt = node.get(p)
+        if not isinstance(nxt, dict):
+            if value is None:
+                return
+            nxt = {}
+            node[p] = nxt
+        node = nxt
+    if value is None:
+        node.pop(parts[-1], None)
+
+        def prune(d):
+            for k in list(d):
+                if isinstance(d[k], dict):
+                    prune(d[k])
+                    if not d[k]:
+                        del d[k]
+        prune(data)
+    else:
+        node[parts[-1]] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
 SKILL_TEMPLATE = """---
 name: {name}
 description: TODO — one sentence on what this does, then "Use when ..." triggers.
@@ -709,6 +951,25 @@ PAGE = """<!doctype html>
   .chip.coll { border-color: var(--yellow); }
   .chip .warn { color: var(--red); }
   .chip a { color: var(--red); text-decoration: none; }
+  .srow { display: flex; gap: 1rem; padding: .6rem .75rem;
+    border-bottom: 1px solid var(--bg1); align-items: flex-start; }
+  .srow:hover { background: var(--bg1); border-radius: 6px; }
+  .srow .smeta { flex: 1; min-width: 0; }
+  .srow .skey { color: var(--aqua); font-weight: bold; font-size: .85rem; margin-right: .5rem; }
+  .srow .sdesc { color: var(--fg2); font-size: .75rem; }
+  .srow .sctrl { display: flex; gap: .4rem; align-items: flex-start;
+    width: 26rem; max-width: 48%; flex-wrap: wrap; justify-content: flex-end; }
+  .srow .sctrl input[type=text] { flex: 1; min-width: 10rem; padding: .3rem .5rem; font-size: .78rem; }
+  .srow .sctrl textarea { flex: 1; min-width: 14rem; background: var(--bg1);
+    border: 1px solid var(--bg2); color: var(--fg); border-radius: 6px;
+    font: inherit; font-size: .75rem; padding: .4rem .5rem; }
+  .srow .sctrl textarea:focus { outline: none; border-color: var(--blue); }
+  .sethead { color: var(--fg2); font-size: .8rem; margin-bottom: .75rem; }
+  .sethead .warn { color: var(--orange); }
+  .banner {
+    padding: .55rem .75rem; border: 1px solid; border-radius: 6px;
+    font-size: .82rem; margin-bottom: 1rem; }
+  .banner.warn { color: var(--orange); border-color: var(--orange); }
   #toast {
     position: fixed; bottom: 1.25rem; left: 50%; translate: -50% 0;
     background: var(--bg2); color: var(--fg); padding: .6rem 1rem;
@@ -733,6 +994,8 @@ PAGE = """<!doctype html>
     <div class="cfgdir hint" id="cfghint"></div>
   </details>
   <div class="tabs" id="tabs"></div>
+  <div id="settingsview" hidden></div>
+  <div id="itemsview">
   <div class="bar">
     <input type="search" id="q" placeholder="filter…" autofocus>
     <button onclick="newGroup()">+ folder</button>
@@ -747,11 +1010,12 @@ PAGE = """<!doctype html>
   <div id="active"></div>
   <h2>Archive <span class="count" id="n-archived"></span></h2>
   <div id="archived"></div>
+  </div>
 </main>
 <div id="toast"></div>
 <script>
 let DATA = { types: {}, links: [], config_dir: "", collections: [] };
-let TAB = "skills";
+let TAB = location.hash.slice(1) || "skills";
 
 async function api(path, body) {
   const res = await fetch(path, body
@@ -855,13 +1119,130 @@ async function resetCfgDir() {
 function renderTabs() {
   const el = document.getElementById("tabs");
   el.innerHTML = "";
-  for (const t of Object.keys(DATA.types)) {
+  for (const t of [...Object.keys(DATA.types), "settings"]) {
     const b = document.createElement("button");
-    b.textContent = t + " · " + DATA.types[t].active.length;
+    b.textContent = t === "settings"
+      ? "settings · " + Object.keys((DATA.settings || {}).data || {}).length
+      : t + " · " + DATA.types[t].active.length;
     b.className = t === TAB ? "on" : "";
-    b.onclick = () => { TAB = t; render(); };
+    b.onclick = () => { TAB = t; location.hash = t; render(); };
     el.appendChild(b);
   }
+}
+
+function settingsGet(key) {
+  let node = (DATA.settings || {}).data || {};
+  for (const p of key.split(".")) {
+    if (node == null || typeof node !== "object") return undefined;
+    node = node[p];
+  }
+  return node;
+}
+
+function settingRow(s) {
+  const cur = settingsGet(s.key);
+  const isSet = cur !== undefined;
+  const row = document.createElement("div");
+  row.className = "srow";
+  const id = "set_" + s.key.replace(/[^a-zA-Z0-9]/g, "_");
+  let ctrl = "";
+  if (s.type === "bool" || s.type === "enum") {
+    const vals = s.type === "bool" ? ["true", "false"] : s.values;
+    ctrl = `<select onchange="saveSetting('${s.key}','${s.type}',this.value)">` +
+      `<option value="">(unset${s.default !== undefined ? ", default: " + s.default : ""})</option>` +
+      vals.map((v) => `<option ${isSet && String(cur) === String(v) ? "selected" : ""}>${v}</option>`).join("") +
+      "</select>";
+  } else if (s.type === "string" || s.type === "number") {
+    ctrl = `<input type="text" id="${id}" value="${isSet ? esc(String(cur)) : ""}"` +
+      ` placeholder="${s.default !== undefined ? "default: " + esc(String(s.default)) : "(unset)"}">` +
+      `<button class="small" onclick="saveSetting('${s.key}','${s.type}',document.getElementById('${id}').value)">set</button>`;
+  } else {
+    let text = "";
+    if (isSet) {
+      if (s.type === "list") text = (cur || []).join("\\n");
+      else if (s.type === "kv") text = Object.entries(cur || {}).map(([k, v]) => k + "=" + v).join("\\n");
+      else text = JSON.stringify(cur, null, 2);
+    }
+    const ph = s.type === "list" ? "one entry per line"
+      : s.type === "kv" ? "KEY=value, one per line" : "JSON";
+    const rows = Math.min(10, Math.max(2, text.split("\\n").length));
+    ctrl = `<textarea id="${id}" rows="${rows}" placeholder="${ph}">${esc(text)}</textarea>` +
+      `<button class="small" onclick="saveSetting('${s.key}','${s.type}',document.getElementById('${id}').value)">set</button>`;
+  }
+  row.innerHTML =
+    `<div class="smeta"><span class="skey">${esc(s.key)}</span>` +
+    (isSet ? '<span class="badge group">set</span>' : "") +
+    `<div class="sdesc">${esc(s.desc)}</div></div>` +
+    `<div class="sctrl">${ctrl}` +
+    (isSet ? `<button class="small danger" onclick="saveSetting('${s.key}','clear','')">clear</button>` : "") +
+    "</div>";
+  return row;
+}
+
+function renderSettings() {
+  const el = document.getElementById("settingsview");
+  const st = DATA.settings || {};
+  el.innerHTML =
+    `<div class="sethead">editing <b>${esc(st.path || "")}</b>` +
+    ` (source: ${st.source === "claude" ? "shared" : esc(st.source || "")}${st.exists ? "" : ", file will be created on first set"})` +
+    (st.linked ? "" : ' <span class="warn">— not linked into the config dir; link settings.json in the panel above for changes to take effect</span>') +
+    "</div>";
+  if (st.error) {
+    const b = document.createElement("div");
+    b.className = "banner warn";
+    b.textContent = "settings.json has invalid JSON — fix the file by hand; form editing is disabled. " + st.error;
+    el.appendChild(b);
+    return;
+  }
+  const cats = {};
+  for (const s of SCHEMA) (cats[s.cat] = cats[s.cat] || []).push(s);
+  for (const [cat, items] of Object.entries(cats)) {
+    const h = document.createElement("h2");
+    h.textContent = cat;
+    el.appendChild(h);
+    for (const s of items) el.appendChild(settingRow(s));
+  }
+  const covered = new Set(SCHEMA.map((s) => s.key.split(".")[0]));
+  const extra = Object.keys(st.data || {}).filter((k) => !covered.has(k));
+  if (extra.length) {
+    const h = document.createElement("h2");
+    h.textContent = "other keys in file";
+    el.appendChild(h);
+    for (const k of extra)
+      el.appendChild(settingRow({ key: k, type: "json", desc: "(not in the documented schema — edited as raw JSON)" }));
+  }
+}
+
+async function saveSetting(key, type, raw) {
+  let value = null;
+  try {
+    if (type !== "clear" && raw !== "" && raw != null) {
+      if (type === "bool") value = raw === "true";
+      else if (type === "number") {
+        value = Number(raw);
+        if (Number.isNaN(value)) throw new Error("not a number");
+      } else if (type === "enum" || type === "string") value = raw;
+      else if (type === "list") {
+        value = raw.split("\\n").map((l) => l.trim()).filter(Boolean);
+        if (!value.length) value = null;
+      } else if (type === "kv") {
+        value = {};
+        for (const line of raw.split("\\n")) {
+          const l = line.trim();
+          if (!l) continue;
+          const i = l.indexOf("=");
+          if (i < 1) throw new Error("expected KEY=value: " + l);
+          value[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+        }
+        if (!Object.keys(value).length) value = null;
+      } else if (type === "json") value = JSON.parse(raw);
+    }
+  } catch (e) { toast("invalid value: " + e.message, true); return; }
+  try {
+    await api("/api/settings-set", { key, value });
+    toast(value === null ? key + " cleared" : key + " set");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
 function renderGroups() {
@@ -890,6 +1271,10 @@ function renderGroups() {
 function render() {
   renderLinks();
   renderTabs();
+  const isSettings = TAB === "settings";
+  document.getElementById("itemsview").hidden = isSettings;
+  document.getElementById("settingsview").hidden = !isSettings;
+  if (isSettings) { renderSettings(); return; }
   renderGroups();
   const q = document.getElementById("q").value.toLowerCase();
   const data = DATA.types[TAB] || { active: [], archived: [] };
@@ -927,9 +1312,11 @@ function render() {
   }
 }
 
+const SCHEMA = __SCHEMA__;
+
 async function refresh() {
   DATA = await api("/api/state");
-  if (!DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
+  if (TAB !== "settings" && !DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
   render();
 }
 
@@ -1097,7 +1484,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/":
-            self.send(200, PAGE, "text/html; charset=utf-8")
+            self.send(200, PAGE.replace("__SCHEMA__", json.dumps(SETTINGS_SCHEMA)),
+                      "text/html; charset=utf-8")
         elif self.path == "/api/state":
             reconcile_links()
             types = {}
@@ -1120,6 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, {
                 "types": types,
                 "links": link_state(),
+                "settings": settings_state(),
                 "collections": collections(),
                 "config_dir": str(config_dir()).replace(home, "~", 1),
                 "default_dir": "config_dir" not in read_cfg()
@@ -1427,6 +1816,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if action == "upload-collection":
                 self.send(200, self.handle_collection_upload(req))
+                return
+            if action == "settings-set":
+                settings_set(req.get("key", ""), req.get("value"))
+                self.send(200, {"ok": True})
                 return
             type_ = req.get("type", "skills")
             if type_ not in TYPES:
