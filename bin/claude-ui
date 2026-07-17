@@ -702,7 +702,16 @@ C = {"yellow": "38;5;214", "blue": "38;5;109", "green": "38;5;142",
      "purple": "38;5;175", "red": "38;5;167"}
 
 def paint(name, s):
-    return "\\033[" + C.get(name, "0") + "m" + s + "\\033[0m" if s else ""
+    if not s:
+        return ""
+    if name and name.startswith("#") and len(name) == 7:
+        try:
+            code = "38;2;" + ";".join(str(int(name[i:i + 2], 16)) for i in (1, 3, 5))
+        except ValueError:
+            code = "0"
+    else:
+        code = C.get(name, "0")
+    return "\\033[" + code + "m" + s + "\\033[0m"
 
 # Historical costs come from ccusage (sums the ~/.claude/projects transcripts;
 # https://ccusage.com). It can take seconds, so results live in a cache file
@@ -991,15 +1000,19 @@ for f in CONFIG.get("fields", []):
     if not f.get("enabled"):
         continue
     fid = f.get("id") or ""
-    if fid.startswith("br"):
+    if fid in ("br1", "br2", "br3"):
         lines.append([])
         continue
     fn = FIELDS.get(fid)
     if fn:
         v = fn[0]()
         if v:
-            lines[-1].append(paint(fn[1], v))
+            lines[-1].append(paint(f.get("color") or fn[1], v))
+# A visible separator always gets one space of breathing room on each side;
+# a whitespace-only separator is used as-is.
 sep = CONFIG.get("separator", "  ")
+if sep.strip():
+    sep = " " + sep.strip() + " "
 print("\\n".join(sep.join(l) for l in lines if l))
 '''
 
@@ -1026,6 +1039,10 @@ def statusline_state():
             "current_statusline": sl}
 
 
+STATUSLINE_COLOR_NAMES = {"yellow", "blue", "green", "aqua", "orange",
+                          "gray", "purple", "red"}
+
+
 def statusline_save(config, apply):
     if not isinstance(config, dict) or not isinstance(config.get("fields"), list):
         raise ValueError("bad statusline config")
@@ -1034,7 +1051,15 @@ def statusline_save(config, apply):
     for f in config["fields"]:
         if not isinstance(f, dict) or f.get("id") not in known:
             raise ValueError(f"unknown statusline field: {f}")
-        fields.append({"id": f["id"], "enabled": bool(f.get("enabled"))})
+        entry = {"id": f["id"], "enabled": bool(f.get("enabled"))}
+        color = f.get("color")
+        if color:
+            if not isinstance(color, str) or not (
+                    color in STATUSLINE_COLOR_NAMES
+                    or re.fullmatch(r"#[0-9a-fA-F]{6}", color)):
+                raise ValueError(f"bad statusline color: {color}")
+            entry["color"] = color
+        fields.append(entry)
     sep = config.get("separator", "  ")
     if not isinstance(sep, str) or len(sep) > 16:
         raise ValueError("bad separator")
@@ -1584,8 +1609,44 @@ PAGE = """<!doctype html>
   .badge.ok { color: var(--green); border-color: var(--green); }
   .stlpreview { background: #1d2021; border: 1px solid var(--bg2);
     border-radius: 6px; padding: .55rem .8rem; margin-bottom: 1rem;
-    font-size: .85rem; white-space: nowrap; overflow-x: auto; }
-  .stlrow button:disabled { opacity: .3; cursor: default; }
+    font-size: .85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .stlgrid { display: flex; gap: 1rem; align-items: flex-start; }
+  .stlbuild { flex: 1; min-width: 0; }
+  .stlside { width: 16rem; flex-shrink: 0; border: 1px solid var(--bg2);
+    border-radius: 8px; padding: .6rem .7rem; position: sticky; top: 1rem; }
+  .stlside h3 { margin: 0 0 .2rem; font-size: .72rem; text-transform: uppercase;
+    letter-spacing: .1em; color: var(--fg2); font-weight: normal; }
+  .stlside .hint { color: var(--bg2); font-size: .7rem; margin-bottom: .5rem; }
+  .stlside.drag { border-color: var(--orange); }
+  .stlchips { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .stlline { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center;
+    border: 1px dashed var(--bg2); border-radius: 6px; padding: .45rem .5rem;
+    margin-bottom: .5rem; min-height: 2.3rem; }
+  .stlline.drag { border-color: var(--blue); background: var(--bg1); }
+  .stlline .lno { color: var(--bg2); font-size: .7rem; margin-right: .2rem;
+    user-select: none; }
+  .stlline .ldel { margin-left: auto; align-self: center; }
+  .stlline .empty { padding: 0; }
+  .stlchip { border: 1px solid; border-radius: 99px; padding: .1rem .55rem;
+    font-size: .75rem; cursor: grab; user-select: none; white-space: nowrap;
+    display: inline-flex; gap: .35rem; align-items: center; background: var(--bg); }
+  .stlchip.sel { outline: 2px solid var(--fg); outline-offset: 1px; }
+  .stlchip.dragging { opacity: .35; }
+  .stlchip .x { cursor: pointer; opacity: .55; }
+  .stlchip .x:hover { opacity: 1; color: var(--red); }
+  .stlchip.pal { border-color: var(--bg2) !important; background: var(--bg1); }
+  .stlcolors { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+    border: 1px solid var(--bg2); border-radius: 6px; padding: .5rem .6rem;
+    margin-bottom: .5rem; font-size: .75rem; }
+  .stlcolors .who { color: var(--fg2); margin-right: .2rem; }
+  .swatch { width: 1.15rem; height: 1.15rem; border-radius: 50%; padding: 0;
+    border: 1px solid var(--bg2); cursor: pointer; }
+  .swatch.on { outline: 2px solid var(--fg); outline-offset: 1px; }
+  .stlcolors input[type=color] { width: 1.6rem; height: 1.35rem; padding: 0;
+    border: 1px solid var(--bg2); border-radius: 4px; background: var(--bg1);
+    cursor: pointer; }
+  @media (max-width: 720px) { .stlgrid { flex-direction: column; }
+    .stlside { width: 100%; position: static; } }
   .mcppanel { border: 1px solid var(--bg2); border-radius: 8px;
     padding: .75rem .9rem; margin-bottom: 1rem; }
   .mcppanel .bar { margin-bottom: .6rem; }
@@ -1646,13 +1707,18 @@ PAGE = """<!doctype html>
       machine-only servers can be adopted into the repo or removed.</p>
       <p><b>Statusline:</b> every field documented in the
       <a href="https://code.claude.com/docs/en/statusline" target="_blank">statusline
-      stdin schema</a> is available; "line break" entries split the output onto
-      multiple lines (narrow terminals truncate a long single line). Claude Code
-      re-runs the script after each assistant message — set a refresh interval to
-      also update while idle; no restart is ever needed. The cost today / 7 days /
-      month fields shell out to <code>ccusage</code> (or <code>npx ccusage</code>)
-      in the background and cache results for 5 minutes — they stay hidden until
-      the first refresh completes, and show nothing if ccusage isn't available.</p>
+      stdin schema</a> is available from the palette on the right — click or drag
+      a field onto a line, drag chips to reorder or move them between lines, and
+      drag one back to the palette (or hit its ×) to remove it. Up to four lines
+      are supported (narrow terminals truncate a long single line). Click a chip
+      to pick its colour — one of the palette presets or a custom hex colour
+      (custom needs a truecolor terminal). A visible separator automatically
+      gets a space on each side. Claude Code re-runs the script after each
+      assistant message — set a refresh interval to also update while idle; no
+      restart is ever needed. The cost today / 7 days / month fields shell out
+      to <code>ccusage</code> (or <code>npx ccusage</code>) in the background and
+      cache results for 5 minutes — they stay hidden until the first refresh
+      completes, and show nothing if ccusage isn't available.</p>
       <p><b>Limitations:</b> a non-default config dir only takes effect if you
       <code>export CLAUDE_CONFIG_DIR=...</code> in your shell — the UI can't do that
       for you. Claude Code reads settings/CLAUDE.md at session start, so changes
@@ -2091,41 +2157,216 @@ function renderMcp() {
 }
 
 let STL = null;
+let STL_DRAG = null;
 
 const STL_COLORS = { yellow: "var(--yellow)", blue: "var(--blue)", green: "var(--green)",
   aqua: "var(--aqua)", orange: "var(--orange)", gray: "var(--fg2)",
   purple: "#d3869b", red: "var(--red)" };
 
+const STL_MAX_LINES = 4; // the config format has three line-break fields (br1-3)
+
+function stlAvail() {
+  return new Map(((DATA.statusline || {}).available || []).map((f) => [f.id, f]));
+}
+
+// The saved config is a flat ordered field list with br1-3 pseudo-fields as
+// line breaks; the UI models it as lines of enabled chips plus a palette of
+// unused fields, with color overrides kept aside so they survive removal.
 function stlInit() {
   const st = DATA.statusline || {};
   const cfg = st.config || st.default || { separator: "  ", fields: [] };
-  const avail = new Map((st.available || []).map((f) => [f.id, f]));
-  const fields = [];
-  for (const f of cfg.fields || [])
-    if (avail.has(f.id)) fields.push({ id: f.id, enabled: !!f.enabled });
+  const avail = stlAvail();
+  const lines = [[]];
+  const palette = [];
+  const colors = {};
+  const seen = new Set();
+  const all = [...(cfg.fields || [])];
   for (const f of st.available || [])
-    if (!fields.some((x) => x.id === f.id)) fields.push({ id: f.id, enabled: false });
+    if (!all.some((x) => x.id === f.id)) all.push({ id: f.id, enabled: false });
+  for (const f of all) {
+    if (!avail.has(f.id) || seen.has(f.id)) continue;
+    seen.add(f.id);
+    if (f.color) colors[f.id] = f.color;
+    if (/^br[123]$/.test(f.id)) {
+      if (f.enabled && lines.length < STL_MAX_LINES) lines.push([]);
+      continue;
+    }
+    if (f.enabled) lines[lines.length - 1].push(f.id);
+    else palette.push(f.id);
+  }
   STL = { separator: cfg.separator !== undefined ? cfg.separator : "  ",
-    refresh: cfg.refresh || 0, fields };
+    refresh: cfg.refresh || 0, lines, palette, colors, sel: null };
 }
 
-function stlMove(i, delta) {
-  const j = i + delta;
-  if (j < 0 || j >= STL.fields.length) return;
-  [STL.fields[i], STL.fields[j]] = [STL.fields[j], STL.fields[i]];
+// Back to the flat format: enabled fields line by line with br1-3 between
+// lines, then the unused fields (disabled) so their order and colors persist.
+function stlFields() {
+  const fields = [];
+  STL.lines.forEach((line, i) => {
+    if (i > 0) fields.push({ id: "br" + i, enabled: true });
+    for (const id of line) {
+      const e = { id, enabled: true };
+      if (STL.colors[id]) e.color = STL.colors[id];
+      fields.push(e);
+    }
+  });
+  for (let i = STL.lines.length; i <= 3; i++) fields.push({ id: "br" + i, enabled: false });
+  for (const id of STL.palette) {
+    const e = { id, enabled: false };
+    if (STL.colors[id]) e.color = STL.colors[id];
+    fields.push(e);
+  }
+  return fields;
+}
+
+function stlColor(id) {
+  const c = STL.colors[id] || (stlAvail().get(id) || {}).color;
+  return c && c.startsWith("#") ? c : STL_COLORS[c] || "var(--fg)";
+}
+
+function stlPalAdd(id) {
+  STL.palette.push(id);
+  const order = new Map([...stlAvail().keys()].map((k, i) => [k, i]));
+  STL.palette.sort((a, b) => order.get(a) - order.get(b));
+}
+
+// Move the dragged chip (from a line or the palette) into line li; fi is the
+// insertion index, or null to append.
+function stlDrop(li, fi) {
+  const d = STL_DRAG;
+  STL_DRAG = null;
+  if (!d) return;
+  let at = fi;
+  if (d.src === "line") {
+    if (d.line === li && at !== null && d.idx < at) at--;
+    STL.lines[d.line].splice(d.idx, 1);
+  } else {
+    STL.palette = STL.palette.filter((x) => x !== d.id);
+  }
+  const line = STL.lines[li];
+  line.splice(at === null ? line.length : at, 0, d.id);
   renderStatusline();
 }
 
-function stlToggle(i) {
-  STL.fields[i].enabled = !STL.fields[i].enabled;
+function stlRemove(id) {
+  for (const line of STL.lines) {
+    const i = line.indexOf(id);
+    if (i >= 0) line.splice(i, 1);
+  }
+  stlPalAdd(id);
+  if (STL.sel === id) STL.sel = null;
   renderStatusline();
+}
+
+function stlSetColor(id, color) {
+  if (color) STL.colors[id] = color;
+  else delete STL.colors[id];
+  renderStatusline();
+}
+
+function stlChip(id, li, fi) {
+  const a = stlAvail().get(id);
+  const col = stlColor(id);
+  const chip = document.createElement("span");
+  chip.className = "stlchip" + (STL.sel === id ? " sel" : "");
+  chip.style.color = col;
+  chip.style.borderColor = col;
+  chip.title = a.sample + " — " + a.desc + " (drag to move, click for colour)";
+  chip.draggable = true;
+  chip.ondragstart = (e) => {
+    STL_DRAG = { src: "line", line: li, idx: fi, id };
+    e.dataTransfer.setData("text/plain", id);
+    e.dataTransfer.effectAllowed = "move";
+    chip.classList.add("dragging");
+  };
+  chip.ondragend = () => { STL_DRAG = null; chip.classList.remove("dragging"); };
+  chip.ondragover = (e) => e.preventDefault();
+  chip.ondrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const r = chip.getBoundingClientRect();
+    stlDrop(li, e.clientX - r.left < r.width / 2 ? fi : fi + 1);
+  };
+  chip.onclick = () => { STL.sel = STL.sel === id ? null : id; renderStatusline(); };
+  const label = document.createElement("span");
+  label.textContent = a.label;
+  chip.appendChild(label);
+  const x = document.createElement("span");
+  x.className = "x";
+  x.textContent = "×";
+  x.title = "remove from the statusline";
+  x.onclick = (e) => { e.stopPropagation(); stlRemove(id); };
+  chip.appendChild(x);
+  return chip;
+}
+
+function stlPalChip(id) {
+  const a = stlAvail().get(id);
+  const chip = document.createElement("span");
+  chip.className = "stlchip pal";
+  chip.style.color = stlColor(id);
+  chip.title = a.sample + " — " + a.desc + " (click or drag onto a line to add)";
+  chip.draggable = true;
+  chip.ondragstart = (e) => {
+    STL_DRAG = { src: "palette", id };
+    e.dataTransfer.setData("text/plain", id);
+    e.dataTransfer.effectAllowed = "move";
+    chip.classList.add("dragging");
+  };
+  chip.ondragend = () => { STL_DRAG = null; chip.classList.remove("dragging"); };
+  chip.onclick = () => {
+    STL.palette = STL.palette.filter((x) => x !== id);
+    STL.lines[STL.lines.length - 1].push(id);
+    renderStatusline();
+  };
+  const label = document.createElement("span");
+  label.textContent = a.label;
+  chip.appendChild(label);
+  return chip;
+}
+
+function stlColorPanel() {
+  const id = STL.sel;
+  const a = stlAvail().get(id);
+  const box = document.createElement("div");
+  box.className = "stlcolors";
+  const cur = STL.colors[id] || null;
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = "colour for " + a.label + ":";
+  box.appendChild(who);
+  for (const name of Object.keys(STL_COLORS)) {
+    const b = document.createElement("button");
+    b.className = "swatch" + (cur === name ? " on" : "");
+    b.style.background = STL_COLORS[name];
+    b.title = name;
+    b.onclick = () => stlSetColor(id, name);
+    box.appendChild(b);
+  }
+  const custom = document.createElement("input");
+  custom.type = "color";
+  custom.title = "custom colour (truecolor terminals)";
+  if (cur && cur.startsWith("#")) { custom.value = cur; custom.classList.add("on"); }
+  custom.oninput = () => stlSetColor(id, custom.value);
+  box.appendChild(custom);
+  const def = document.createElement("button");
+  def.className = "small";
+  def.textContent = cur ? "reset to default (" + a.color + ")" : "default (" + a.color + ")";
+  def.disabled = !cur;
+  def.onclick = () => stlSetColor(id, null);
+  box.appendChild(def);
+  const close = document.createElement("button");
+  close.className = "small";
+  close.textContent = "close";
+  close.onclick = () => { STL.sel = null; renderStatusline(); };
+  box.appendChild(close);
+  return box;
 }
 
 function renderStatusline() {
   const el = document.getElementById("stlview");
   const st = DATA.statusline || {};
   if (!STL) stlInit();
-  const avail = new Map((st.available || []).map((f) => [f.id, f]));
   el.innerHTML = "";
   const head = document.createElement("div");
   head.className = "sethead";
@@ -2141,24 +2382,22 @@ function renderStatusline() {
   el.appendChild(head);
   const prev = document.createElement("div");
   prev.className = "stlpreview";
-  const sep = esc(STL.separator).replace(/ /g, "&nbsp;");
-  const lines = [[]];
-  for (const f of STL.fields) {
-    if (!f.enabled) continue;
-    if (f.id.startsWith("br")) { lines.push([]); continue; }
-    const a = avail.get(f.id);
-    lines[lines.length - 1].push(
-      `<span style="color:${STL_COLORS[a.color] || "var(--fg)"}">${esc(a.sample)}</span>`);
-  }
-  const rendered = lines.filter((l) => l.length).map((l) => l.join(sep));
+  const raw = STL.separator;
+  const sep = esc(raw.trim() ? " " + raw.trim() + " " : raw);
+  const rendered = STL.lines
+    .map((line) => line
+      .map((id) => `<span style="color:${stlColor(id)}">${esc(stlAvail().get(id).sample)}</span>`)
+      .join(sep))
+    .filter((l) => l.length);
   prev.innerHTML = rendered.length
     ? rendered.join("<br>")
-    : '<span style="color:var(--bg2)">(no fields enabled)</span>';
+    : '<span style="color:var(--bg2)">(no fields enabled — add some from the palette)</span>';
   el.appendChild(prev);
   const bar = document.createElement("div");
   bar.className = "bar";
   bar.innerHTML =
-    `<span style="align-self:center;font-size:.8rem;color:var(--fg2)">separator</span>` +
+    `<span style="align-self:center;font-size:.8rem;color:var(--fg2)"` +
+    ` title="a visible separator automatically gets one space on each side; leave blank/spaces for space-only separation">separator</span>` +
     `<input type="text" id="stlsep" value="${esc(STL.separator)}" style="width:6rem"` +
     ` oninput="STL.separator=this.value" onchange="renderStatusline()">` +
     `<span style="align-self:center;font-size:.8rem;color:var(--fg2)"` +
@@ -2171,28 +2410,85 @@ function renderStatusline() {
     `<button onclick="stlSave(false)">save</button>` +
     `<button class="primary" onclick="stlSave(true)">save &amp; apply</button>`;
   el.appendChild(bar);
-  STL.fields.forEach((f, i) => {
-    const a = avail.get(f.id);
-    const row = document.createElement("div");
-    row.className = "row stlrow";
-    row.style.opacity = f.enabled ? "1" : ".55";
-    row.innerHTML =
-      `<label style="display:flex;gap:.6rem;align-items:baseline;flex:1;cursor:pointer;min-width:0">` +
-      `<input type="checkbox" ${f.enabled ? "checked" : ""} onchange="stlToggle(${i})">` +
-      `<span class="name">${esc(a.label)}</span>` +
-      `<span class="badge" style="color:${STL_COLORS[a.color]};border-color:${STL_COLORS[a.color]}">${esc(a.sample)}</span>` +
-      `<span class="desc">${esc(a.desc)}</span></label>` +
-      `<span class="actions">` +
-      `<button ${i === 0 ? "disabled" : ""} onclick="stlMove(${i},-1)">▲</button>` +
-      `<button ${i === STL.fields.length - 1 ? "disabled" : ""} onclick="stlMove(${i},1)">▼</button></span>`;
-    el.appendChild(row);
+  const grid = document.createElement("div");
+  grid.className = "stlgrid";
+  const build = document.createElement("div");
+  build.className = "stlbuild";
+  if (STL.sel && STL.lines.some((l) => l.includes(STL.sel))) build.appendChild(stlColorPanel());
+  else STL.sel = null;
+  STL.lines.forEach((line, li) => {
+    const lineEl = document.createElement("div");
+    lineEl.className = "stlline";
+    lineEl.ondragover = (e) => { e.preventDefault(); lineEl.classList.add("drag"); };
+    lineEl.ondragleave = () => lineEl.classList.remove("drag");
+    lineEl.ondrop = (e) => { e.preventDefault(); stlDrop(li, null); };
+    const lno = document.createElement("span");
+    lno.className = "lno";
+    lno.textContent = String(li + 1);
+    lno.title = "line " + (li + 1);
+    lineEl.appendChild(lno);
+    line.forEach((id, fi) => lineEl.appendChild(stlChip(id, li, fi)));
+    if (!line.length) {
+      const ph = document.createElement("span");
+      ph.className = "empty";
+      ph.style.pointerEvents = "none";
+      ph.textContent = "drop fields here";
+      lineEl.appendChild(ph);
+    }
+    if (STL.lines.length > 1) {
+      const del = document.createElement("button");
+      del.className = "small ldel";
+      del.textContent = "× line";
+      del.title = "remove this line (its fields move to the line above)";
+      del.onclick = () => {
+        const dst = li > 0 ? li - 1 : 1;
+        STL.lines[dst].push(...STL.lines[li]);
+        STL.lines.splice(li, 1);
+        renderStatusline();
+      };
+      lineEl.appendChild(del);
+    }
+    build.appendChild(lineEl);
   });
+  const add = document.createElement("button");
+  add.className = "small";
+  add.textContent = "+ line";
+  add.disabled = STL.lines.length >= STL_MAX_LINES;
+  add.title = add.disabled
+    ? "max " + STL_MAX_LINES + " lines (the config has three line breaks)"
+    : "add a line — narrow terminals truncate long lines instead of wrapping";
+  add.onclick = () => { STL.lines.push([]); renderStatusline(); };
+  build.appendChild(add);
+  grid.appendChild(build);
+  const side = document.createElement("div");
+  side.className = "stlside";
+  side.innerHTML =
+    `<h3>available fields</h3>` +
+    `<div class="hint">click or drag onto a line · drag a chip back here to remove</div>`;
+  side.ondragover = (e) => {
+    if (STL_DRAG && STL_DRAG.src === "line") { e.preventDefault(); side.classList.add("drag"); }
+  };
+  side.ondragleave = () => side.classList.remove("drag");
+  side.ondrop = (e) => {
+    e.preventDefault();
+    const d = STL_DRAG;
+    STL_DRAG = null;
+    if (!d || d.src !== "line") return;
+    stlRemove(d.id);
+  };
+  const chips = document.createElement("div");
+  chips.className = "stlchips";
+  for (const id of STL.palette) chips.appendChild(stlPalChip(id));
+  if (!STL.palette.length) chips.innerHTML = '<span class="empty">all fields in use</span>';
+  side.appendChild(chips);
+  grid.appendChild(side);
+  el.appendChild(grid);
 }
 
 async function stlSave(apply) {
   try {
     await api("/api/statusline-save", {
-      config: { separator: STL.separator, refresh: STL.refresh, fields: STL.fields },
+      config: { separator: STL.separator, refresh: STL.refresh, fields: stlFields() },
       apply });
     toast(apply
       ? "statusline saved and statusLine set in settings.json — make sure statusline.sh and settings.json are linked"
