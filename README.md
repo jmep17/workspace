@@ -73,28 +73,37 @@ digit bindings in `ghostty/config`, then reload with `cmd+shift+,`.
 user-level skills everywhere on the machine, and a `git pull` updates them
 in place.
 
-Machine-local skills (e.g. work-specific ones that must not be committed
-here) live elsewhere and are symlinked in under a `work-` prefix, which
-`.gitignore` excludes:
+### Groups (nested folders)
 
-```fish
-# skill content lives outside this repo, e.g. ~/work-skills/deploy-checklist
-ln -s ~/work-skills/deploy-checklist ~/src/workspace/skills/work-deploy-checklist
-```
+Skills can be organized into nested folders ("groups"): any directory under
+`skills/` without its own `SKILL.md` — e.g. `skills/work/`, `skills/ai/`.
+Claude Code only discovers **direct children** of the skills dir, so nesting
+alone would hide a skill; skills-ui bridges this by auto-maintaining a
+top-level `<group>-<name>` symlink for every group member (created and
+pruned on each page load). The skill's name as Claude Code sees it is the
+link name, e.g. `skills/ai/prompter/` loads as `ai-prompter`. Commit both
+the content dir and the generated link for shared groups.
 
-Claude Code follows nested symlinks, so the skill loads like any other while
-its content stays out of this repo — keep `~/work-skills` in its own
-(private) repo if it should be versioned and backed up.
+The `work` group is special: `.gitignore` excludes `skills/work/` and all
+`work-*` entries, so work-specific skills live there — fully functional,
+never committed. External skills can also be symlinked in by hand
+(`ln -s ~/elsewhere/skill skills/work-name`); the manager leaves foreign
+symlinks alone.
 
 ### skills-ui
 
 `bin/skills-ui` (Python stdlib, no deps) serves a local gruvbox-styled page
 at `http://127.0.0.1:7333` for managing skills: archive, restore, delete,
-upload a skill folder from disk, scaffold a new one, filter, and spot
-problems (broken symlinks, missing `SKILL.md`). Archiving moves a skill to
-`archive/`, which Claude Code doesn't scan, so it stops loading everywhere;
-restore moves it back. Moves are plain renames on disk — review and commit
-them with git as usual (`work-*` skills stay gitignored).
+create groups and move skills between them, upload a folder from disk,
+scaffold a new skill, filter, and spot problems (broken symlinks, missing
+`SKILL.md`). Archiving moves a skill to `archive/` (group structure
+preserved), which Claude Code doesn't scan, so it stops loading everywhere;
+restore moves it back. Everything is plain file moves — review and commit
+with git as usual (the `work` group stays gitignored).
+
+Uploading a folder that itself contains skill folders (no top-level
+`SKILL.md`) imports it as a whole group; naming an upload or new skill
+`<group>-<name>` files it directly into that group.
 
 A banner at the top shows whether `~/.claude/skills` points at this repo;
 if not, a **link now** button sets up the symlink from step 2 for you

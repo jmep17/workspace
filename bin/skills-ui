@@ -3,8 +3,12 @@
 
 Usage:  bin/skills-ui [--port 7333]
 
-Lists every skill under skills/ (and archive/), with actions:
-archive, restore, delete, and scaffolding a new skill. Stdlib only.
+Lists every skill under skills/ (and archive/), with actions: archive,
+restore, delete, move between groups, upload a folder from disk, and
+scaffolding a new skill. A "group" is any nested directory under skills/
+without a SKILL.md of its own; Claude Code only discovers direct children
+of the skills dir, so each group member gets an auto-managed top-level
+<group>-<name> symlink. Stdlib only.
 """
 
 import argparse
@@ -52,36 +56,110 @@ def parse_frontmatter(text):
     return meta
 
 
+def is_group(entry):
+    """A group is a real (non-symlink) dir without its own SKILL.md."""
+    return (entry.is_dir() and not entry.is_symlink()
+            and not entry.name.startswith(".")
+            and not (entry / "SKILL.md").is_file())
+
+
+def group_names():
+    """Known group names across skills/ and archive/."""
+    names = set()
+    for root in (SKILLS, ARCHIVE):
+        if root.is_dir():
+            names.update(e.name for e in root.iterdir() if is_group(e))
+    return sorted(names)
+
+
+def split_managed(name):
+    """'<g>-<x>' -> (g, x) if g is a known group (longest match), else None."""
+    for g in sorted(group_names(), key=len, reverse=True):
+        if name.startswith(g + "-") and len(name) > len(g) + 1:
+            return g, name[len(g) + 1:]
+    return None
+
+
+def reconcile_links():
+    """Keep top-level <group>-<name> symlinks in sync with group contents.
+
+    Claude Code only discovers direct children of the skills dir, so each
+    content dir skills/<g>/<x> needs a skills/<g>-<x> symlink. Creates
+    missing links and prunes broken links that point inside skills/.
+    """
+    for entry in sorted(SKILLS.iterdir()) if SKILLS.is_dir() else []:
+        if not is_group(entry):
+            continue
+        for d in sorted(entry.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                link = SKILLS / f"{entry.name}-{d.name}"
+                if not (link.exists() or link.is_symlink()):
+                    link.symlink_to(Path(entry.name) / d.name)
+    for entry in SKILLS.iterdir():
+        if not entry.is_symlink():
+            continue
+        raw = entry.readlink()
+        target = raw if raw.is_absolute() else SKILLS / raw
+        try:
+            inside = target.resolve().is_relative_to(SKILLS.resolve())
+        except OSError:
+            inside = False
+        if inside and not target.exists():
+            entry.unlink()
+
+
+def item(entry, scope, name=None, group=None):
+    skill_md = entry / "SKILL.md"
+    meta = parse_frontmatter(skill_md.read_text(errors="replace")) if skill_md.is_file() else {}
+    n = name or entry.name
+    return {
+        "name": n, "scope": scope, "symlink": entry.is_symlink(),
+        "group": group, "managed": group is not None,
+        "local": n.startswith("work-") or group == "work",
+        "broken": False, "has_skill_md": skill_md.is_file(),
+        "description": meta.get("description", ""),
+        "files": sum(1 for p in entry.rglob("*") if p.is_file()),
+        "path": str(entry),
+        "movable": scope == "active" and (group is not None or not entry.is_symlink()),
+    }
+
+
 def scan(root, scope):
     items = []
     if not root.is_dir():
         return items
+    root_res = root.resolve()
     for entry in sorted(root.iterdir()):
-        if entry.name.startswith(".") or not entry.is_dir():
-            # is_dir() follows symlinks, so broken links land here too
+        if entry.name.startswith("."):
+            continue
+        if is_group(entry):
+            # active group members surface via their top-level symlinks;
+            # archived ones have no links, so list them directly
+            if root == ARCHIVE:
+                for d in sorted(entry.iterdir()):
+                    if d.is_dir() and not d.name.startswith("."):
+                        items.append(item(d, scope, name=f"{entry.name}-{d.name}",
+                                          group=entry.name))
+            continue
+        if not entry.is_dir():
             if entry.is_symlink():
                 items.append({
                     "name": entry.name, "scope": scope, "broken": True,
-                    "symlink": True, "description": "(broken symlink: "
-                    + str(Path(entry).readlink()) + ")", "files": 0,
+                    "symlink": True, "group": None, "managed": False,
+                    "local": entry.name.startswith("work-"), "movable": False,
+                    "description": "(broken symlink: " + str(entry.readlink()) + ")",
+                    "files": 0,
                 })
             continue
-        skill_md = entry / "SKILL.md"
-        meta = {}
-        if skill_md.is_file():
-            meta = parse_frontmatter(skill_md.read_text(errors="replace"))
-        files = sum(1 for p in entry.rglob("*") if p.is_file())
-        items.append({
-            "name": entry.name,
-            "scope": scope,
-            "symlink": entry.is_symlink(),
-            "local": entry.name.startswith("work-"),
-            "broken": False,
-            "has_skill_md": skill_md.is_file(),
-            "description": meta.get("description", ""),
-            "files": files,
-            "path": str(entry),
-        })
+        group = None
+        if entry.is_symlink():
+            try:
+                rp = entry.resolve()
+                if rp.parent != root_res and rp.parent.parent == root_res:
+                    group = rp.parent.name
+            except OSError:
+                pass
+        items.append(item(entry, scope, group=group))
     return items
 
 
@@ -132,6 +210,12 @@ def resolve(scope, name):
     if path.parent != root:
         raise ValueError("bad path")
     return path
+
+
+def creation_path(name):
+    """Where new content for `name` lives: inside its group if one matches."""
+    sm = split_managed(name)
+    return SKILLS / sm[0] / sm[1] if sm else SKILLS / name
 
 
 def move_entry(src, dst_root):
@@ -203,6 +287,7 @@ PAGE = """<!doctype html>
   .badge { font-size: .68rem; padding: .05rem .45rem; border-radius: 99px;
     border: 1px solid; white-space: nowrap; }
   .badge.local { color: var(--orange); border-color: var(--orange); }
+  .badge.group { color: var(--yellow); border-color: var(--yellow); }
   .badge.link { color: var(--blue); border-color: var(--blue); }
   .badge.warn { color: var(--red); border-color: var(--red); }
   .actions { display: flex; gap: .4rem; }
@@ -226,10 +311,11 @@ PAGE = """<!doctype html>
 </style>
 <main>
   <h1>skills</h1>
-  <p class="sub">Active skills load in Claude Code everywhere; archived ones sit in <b>archive/</b> and don't. Moves are plain renames — review &amp; commit with git as usual.</p>
+  <p class="sub">Active skills load in Claude Code everywhere; archived ones sit in <b>archive/</b> and don't. Groups are nested folders — members get auto-managed <b>&lt;group&gt;-&lt;name&gt;</b> links so Claude Code finds them. Everything is plain files — review &amp; commit with git as usual.</p>
   <div id="link" class="banner" hidden></div>
   <div class="bar">
     <input type="search" id="q" placeholder="filter…" autofocus>
+    <button onclick="newGroup()">+ group</button>
     <button onclick="document.getElementById('up').click()">⇪ upload</button>
     <button class="primary" onclick="newSkill()">+ new skill</button>
     <input type="file" id="up" webkitdirectory multiple hidden>
@@ -241,7 +327,7 @@ PAGE = """<!doctype html>
 </main>
 <div id="toast"></div>
 <script>
-let DATA = { active: [], archived: [] };
+let DATA = { active: [], archived: [], groups: [] };
 
 async function api(path, body) {
   const res = await fetch(path, body
@@ -307,10 +393,12 @@ function render() {
       const row = document.createElement("div");
       row.className = "row " + scope;
       const badges =
-        (s.local ? '<span class="badge local">work-local</span>' : "") +
-        (s.symlink ? '<span class="badge link">symlink</span>' : "") +
+        (s.group ? `<span class="badge group">${esc(s.group)}/</span>` : "") +
+        (s.local ? '<span class="badge local">gitignored</span>' : "") +
+        (s.symlink && !s.managed ? '<span class="badge link">symlink</span>' : "") +
         (s.broken ? '<span class="badge warn">broken</span>' : "") +
         (s.has_skill_md === false && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "");
+      const move = s.movable ? `<button onclick="moveToGroup('${s.name}')">move</button>` : "";
       const act =
         scope === "active"
           ? `<button onclick="doMove('archive','${s.name}')">archive</button>`
@@ -318,7 +406,7 @@ function render() {
       row.innerHTML =
         `<span class="name" title="${s.path || ""}">${s.name}</span>` + badges +
         `<span class="desc">${esc(s.description || "")}</span>` +
-        `<span class="actions">${act}<button class="danger" onclick="doDelete('${scope}','${s.name}')">delete</button></span>`;
+        `<span class="actions">${move}${act}<button class="danger" onclick="doDelete('${scope}','${s.name}',${s.managed})">delete</button></span>`;
       box.appendChild(row);
     }
   }
@@ -339,8 +427,33 @@ async function doMove(action, name) {
   } catch (e) { toast(e.message, true); }
 }
 
-async function doDelete(scope, name) {
-  if (!confirm("Permanently delete " + name + "? (a symlink's target is untouched)")) return;
+async function moveToGroup(name) {
+  const gs = DATA.groups || [];
+  const g = prompt(
+    "Move to group — blank for top level" + (gs.length ? " (existing: " + gs.join(", ") + ")" : "") + ":", "");
+  if (g === null) return;
+  try {
+    const r = await api("/api/move", { name, group: g.trim() });
+    toast(name + " → " + r.name);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function newGroup() {
+  const name = prompt("New group (nested folder) name — 'work' stays out of git:");
+  if (!name) return;
+  try {
+    await api("/api/group", { name: name.trim() });
+    toast("group " + name + "/ created — use move to file skills into it");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function doDelete(scope, name, managed) {
+  const msg = managed
+    ? "Permanently delete " + name + " and its files inside its group folder?"
+    : "Permanently delete " + name + "? (a symlink's target is untouched)";
+  if (!confirm(msg)) return;
   try {
     await api("/api/delete", { scope, name });
     toast(name + " deleted");
@@ -349,7 +462,7 @@ async function doDelete(scope, name) {
 }
 
 async function newSkill() {
-  const name = prompt("Skill name (kebab-case; prefix work- to keep it out of git):");
+  const name = prompt("Skill name (kebab-case; '<group>-' prefix files it in that group, work- stays out of git):");
   if (!name) return;
   try {
     const r = await api("/api/new", { name: name.trim() });
@@ -360,12 +473,13 @@ async function newSkill() {
 
 async function uploadSkill(ev) {
   const files = [...ev.target.files].filter(
-    (f) => !/(^|\/)(\.git|node_modules)(\/|$)|(^|\/)\.DS_Store$/.test(f.webkitRelativePath)
+    (f) => !/(^|\\/)(\\.git|node_modules)(\\/|$)|(^|\\/)\\.DS_Store$/.test(f.webkitRelativePath)
   );
   ev.target.value = "";
   if (!files.length) return;
   const root = files[0].webkitRelativePath.split("/")[0];
-  const name = prompt("Import as (prefix work- to keep it out of git):", root);
+  const name = prompt(
+    "Import as (a folder of skills becomes a group; '<group>-' prefix files a single skill into that group):", root);
   if (!name) return;
   const payload = [];
   for (const f of files) {
@@ -410,8 +524,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/":
             self.send(200, PAGE, "text/html; charset=utf-8")
         elif self.path == "/api/skills":
+            reconcile_links()
             self.send(200, {"active": scan(SKILLS, "active"),
                             "archived": scan(ARCHIVE, "archived"),
+                            "groups": sorted(e.name for e in SKILLS.iterdir() if is_group(e)),
                             "link": link_status()})
         else:
             self.send(404, {"error": "not found"})
@@ -421,24 +537,95 @@ class Handler(BaseHTTPRequestHandler):
             req = self.body()
             name = req.get("name", "")
             if self.path == "/api/archive":
-                move_entry(resolve("active", name), ARCHIVE)
+                src = resolve("active", name)
+                sm = split_managed(name)
+                if sm and src.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
+                    g, x = sm
+                    adir = ARCHIVE / g
+                    if (adir / x).exists():
+                        raise ValueError(f"{name}: already exists in archive/{g}/")
+                    adir.mkdir(parents=True, exist_ok=True)
+                    (SKILLS / g / x).rename(adir / x)
+                    src.unlink()
+                else:
+                    move_entry(src, ARCHIVE)
             elif self.path == "/api/restore":
-                move_entry(resolve("archived", name), SKILLS)
+                sm = split_managed(name)
+                if sm and (ARCHIVE / sm[0] / sm[1]).is_dir():
+                    g, x = sm
+                    gdir = SKILLS / g
+                    if (gdir / x).exists():
+                        raise ValueError(f"{name}: already exists in skills/{g}/")
+                    gdir.mkdir(exist_ok=True)
+                    (ARCHIVE / g / x).rename(gdir / x)
+                    reconcile_links()
+                else:
+                    move_entry(resolve("archived", name), SKILLS)
             elif self.path == "/api/delete":
-                path = resolve(req.get("scope", ""), name)
-                if path.is_symlink():
+                scope = req.get("scope", "")
+                path = resolve(scope, name)
+                sm = split_managed(name)
+                root = SKILLS if scope == "active" else ARCHIVE
+                content = root / sm[0] / sm[1] if sm else None
+                if scope == "active" and content and path.is_symlink() and content.is_dir():
+                    path.unlink()
+                    shutil.rmtree(content)
+                elif (scope == "archived" and content and content.is_dir()
+                        and not (path.exists() or path.is_symlink())):
+                    shutil.rmtree(content)
+                elif path.is_symlink():
                     path.unlink()
                 elif path.is_dir():
                     shutil.rmtree(path)
                 else:
                     raise ValueError(f"{name}: not found")
+            elif self.path == "/api/move":
+                dest_g = (req.get("group") or "").strip()
+                if dest_g and not NAME_RE.match(dest_g):
+                    raise ValueError("bad group name")
+                entry = resolve("active", name)
+                sm = split_managed(name)
+                if sm and entry.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
+                    src, link, base = SKILLS / sm[0] / sm[1], entry, sm[1]
+                elif entry.is_dir() and not entry.is_symlink():
+                    src, link, base = entry, None, name
+                else:
+                    raise ValueError(f"{name}: only real skill dirs and group members can move")
+                if dest_g:
+                    gdir = SKILLS / dest_g
+                    if not is_group(gdir):
+                        raise ValueError(f"{dest_g}: no such group (create it with + group)")
+                    dst, new_name = gdir / base, f"{dest_g}-{base}"
+                    taken = SKILLS / new_name
+                    if taken.exists() or taken.is_symlink():
+                        raise ValueError(f"{new_name}: name already taken")
+                else:
+                    dst, new_name = SKILLS / base, base
+                if dst == src:
+                    raise ValueError(f"{name}: already there")
+                if dst.exists() or dst.is_symlink():
+                    raise ValueError(f"{dst.name}: already exists")
+                src.rename(dst)
+                if link:
+                    link.unlink()
+                reconcile_links()
+                self.send(200, {"ok": True, "name": new_name})
+                return
+            elif self.path == "/api/group":
+                if not NAME_RE.match(name):
+                    raise ValueError("bad group name")
+                gdir = SKILLS / name
+                if gdir.exists() or gdir.is_symlink():
+                    raise ValueError(f"{name}: already exists")
+                gdir.mkdir()
             elif self.path == "/api/link":
                 backup = set_up_link()
                 self.send(200, {"ok": True, "backup": backup})
                 return
             elif self.path == "/api/upload":
-                path = resolve("active", name)
-                if path.exists() or path.is_symlink():
+                link = resolve("active", name)
+                path = creation_path(name)
+                if link.exists() or link.is_symlink() or path.exists():
                     raise ValueError(f"{name}: already exists")
                 staged = []
                 total = 0
@@ -462,15 +649,18 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     shutil.rmtree(path, ignore_errors=True)
                     raise
+                reconcile_links()
                 self.send(200, {"ok": True, "files": len(staged),
                                 "path": str(path.relative_to(REPO))})
                 return
             elif self.path == "/api/new":
-                path = resolve("active", name)
-                if path.exists() or path.is_symlink():
+                link = resolve("active", name)
+                path = creation_path(name)
+                if link.exists() or link.is_symlink() or path.exists():
                     raise ValueError(f"{name}: already exists")
                 path.mkdir(parents=True)
                 (path / "SKILL.md").write_text(SKILL_TEMPLATE.format(name=name))
+                reconcile_links()
                 self.send(200, {"ok": True, "path": str(path.relative_to(REPO))})
                 return
             else:
