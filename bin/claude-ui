@@ -574,9 +574,11 @@ PAGE = """<!doctype html>
   <div class="bar">
     <input type="search" id="q" placeholder="filter…" autofocus>
     <button onclick="newGroup()">+ group</button>
-    <button onclick="document.getElementById('up').click()">⇪ upload</button>
+    <button onclick="document.getElementById('up').click()">⇪ folder</button>
+    <button onclick="document.getElementById('upf').click()">⇪ files</button>
     <button class="primary" onclick="newItem()">+ new</button>
     <input type="file" id="up" webkitdirectory multiple hidden>
+    <input type="file" id="upf" multiple hidden>
   </div>
   <div id="groups" class="groups" hidden></div>
   <h2>Active <span class="count" id="n-active"></span></h2>
@@ -846,7 +848,33 @@ async function uploadItems(ev) {
   } catch (e) { toast(e.message, true); }
 }
 
+async function uploadFiles(ev) {
+  const files = [...ev.target.files];
+  ev.target.value = "";
+  if (!files.length) return;
+  const name = prompt(TAB === "skills"
+    ? "Add file(s) to skill — an existing name, or a new one (a lone .md becomes its SKILL.md):"
+    : "Into folder (blank = top level):", "");
+  if (name === null) return;
+  const payload = [];
+  for (const f of files) {
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = "";
+    for (const b of buf) bin += String.fromCharCode(b);
+    payload.push({ path: f.name, content_b64: btoa(bin) });
+  }
+  try {
+    const ep = TAB === "skills" ? "/api/upload-files" : "/api/upload";
+    const r = await api(ep, { type: TAB, name: name.trim(), files: payload });
+    toast(r.created
+      ? "created " + r.path + " (" + r.files + " files)"
+      : "added " + r.files + " file" + (r.files === 1 ? "" : "s") + " to " + (r.path || TAB));
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
 document.getElementById("up").addEventListener("change", uploadItems);
+document.getElementById("upf").addEventListener("change", uploadFiles);
 document.getElementById("q").addEventListener("input", render);
 refresh();
 </script>
@@ -1017,6 +1045,39 @@ class Handler(BaseHTTPRequestHandler):
             reconcile_links()
             return {"ok": True, "files": len(staged), "kind": kind, "skills": nskills,
                     "path": str(path.relative_to(REPO))}
+        elif action == "upload-files":
+            staged = stage_upload(req.get("files"))
+            if any(len(p.parts) != 1 for p, _ in staged):
+                raise ValueError("single-file upload expects plain file names")
+            entry = resolve_skill("active", name)
+            sm = split_managed(name)
+            if sm and entry.is_symlink() and (SKILLS / sm[0] / sm[1]).is_dir():
+                dest, created = SKILLS / sm[0] / sm[1], False
+            elif entry.is_dir():
+                dest, created = entry, False
+            else:
+                dest, created = skill_creation_path(name), True
+                if dest.exists():
+                    raise ValueError(f"{name}: already exists")
+                if not any(p.name == "SKILL.md" for p, _ in staged):
+                    mds = [p for p, _ in staged if p.suffix == ".md"]
+                    if len(mds) == 1:
+                        staged = [(Path("SKILL.md") if p == mds[0] else p, d)
+                                  for p, d in staged]
+                    else:
+                        raise ValueError(
+                            f"{name} doesn't exist — to create it, include a "
+                            "SKILL.md (or upload exactly one .md to become it)")
+            for rel, _ in staged:
+                if (dest / rel).exists():
+                    raise ValueError(f"{rel}: already exists in {name}")
+            if created:
+                dest.mkdir(parents=True)
+            write_staged(staged, dest)
+            if created:
+                reconcile_links()
+            return {"ok": True, "files": len(staged), "created": created,
+                    "path": name}
         elif action == "new":
             link = resolve_skill("active", name)
             path = skill_creation_path(name)
@@ -1134,12 +1195,14 @@ class Handler(BaseHTTPRequestHandler):
             if type_ not in TYPES:
                 raise ValueError("unknown type")
             if action not in ("archive", "restore", "delete", "move",
-                             "group", "group-remove", "upload", "new"):
+                             "group", "group-remove", "upload", "upload-files", "new"):
                 self.send(404, {"error": "not found"})
                 return
             if TYPES[type_]["kind"] == "dir":
                 result = self.handle_skills(action, req)
             else:
+                if action == "upload-files":  # md items ARE files; same handler
+                    action = "upload"
                 result = self.handle_md(type_, action, req)
             self.send(200, result)
         except (ValueError, OSError, json.JSONDecodeError) as e:
