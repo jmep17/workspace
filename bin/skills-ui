@@ -163,6 +163,59 @@ def scan(root, scope):
     return items
 
 
+def group_info():
+    """Per-group health: member count, SKILL.md coverage, loose files."""
+    out = []
+    if not SKILLS.is_dir():
+        return out
+    for entry in sorted(SKILLS.iterdir()):
+        if not is_group(entry):
+            continue
+        members = [d for d in entry.iterdir() if d.is_dir() and not d.name.startswith(".")]
+        out.append({
+            "name": entry.name,
+            "members": len(members),
+            "with_skill_md": sum(1 for d in members if (d / "SKILL.md").is_file()),
+            "loose_files": sum(1 for f in entry.iterdir()
+                               if f.is_file() and not f.name.startswith(".")),
+        })
+    return out
+
+
+def normalize_upload(staged):
+    """Strip redundant wrapper dirs from an upload.
+
+    If neither the root nor any direct subdir has a SKILL.md, but everything
+    sits under a single top-level dir (the user picked a folder one level too
+    high), hoist that dir's contents and re-check.
+    """
+    for _ in range(8):
+        paths = {p for p, _ in staged}
+        if any(p.parts == ("SKILL.md",) for p in paths):
+            break
+        if any(len(p.parts) == 2 and p.parts[1] == "SKILL.md" for p in paths):
+            break
+        tops = {p.parts[0] for p in paths}
+        if len(tops) != 1 or any(len(p.parts) == 1 for p in paths):
+            break
+        staged = [(Path(*p.parts[1:]), d) for p, d in staged]
+    return staged
+
+
+def classify_upload(staged):
+    """('skill', 1) or ('group', n_skills); raises if no SKILL.md anywhere."""
+    paths = {p for p, _ in staged}
+    if any(p.parts == ("SKILL.md",) for p in paths):
+        return "skill", 1
+    skill_dirs = {p.parts[0] for p in paths
+                  if len(p.parts) == 2 and p.parts[1] == "SKILL.md"}
+    if not skill_dirs:
+        raise ValueError(
+            "no SKILL.md found in upload — a single skill needs SKILL.md at "
+            "its root; a group import needs one in each skill subfolder")
+    return "group", len(skill_dirs)
+
+
 def link_status():
     """How ~/.claude/skills relates to this repo's skills/ directory."""
     home = str(Path.home())
@@ -293,6 +346,11 @@ PAGE = """<!doctype html>
   .actions { display: flex; gap: .4rem; }
   .actions button { padding: .25rem .6rem; font-size: .72rem; }
   .empty { color: var(--bg2); padding: .65rem .75rem; font-size: .85rem; }
+  .groups { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+    margin: -.75rem 0 1.25rem; font-size: .75rem; color: var(--fg2); }
+  .chip { border: 1px solid var(--bg2); border-radius: 99px; padding: .1rem .6rem; }
+  .chip .warn { color: var(--red); }
+  .chip a { color: var(--red); text-decoration: none; }
   .banner {
     display: flex; align-items: center; gap: .75rem; margin-bottom: 1.25rem;
     padding: .55rem .75rem; border: 1px solid; border-radius: 6px; font-size: .82rem;
@@ -320,6 +378,7 @@ PAGE = """<!doctype html>
     <button class="primary" onclick="newSkill()">+ new skill</button>
     <input type="file" id="up" webkitdirectory multiple hidden>
   </div>
+  <div id="groups" class="groups" hidden></div>
   <h2>Active <span class="count" id="n-active"></span></h2>
   <div id="active"></div>
   <h2>Archive <span class="count" id="n-archived"></span></h2>
@@ -375,8 +434,40 @@ async function doLink() {
   } catch (e) { toast(e.message, true); }
 }
 
+function renderGroups() {
+  const el = document.getElementById("groups");
+  const gs = DATA.group_info || [];
+  if (!gs.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = "groups: ";
+  for (const g of gs) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    let warn = "";
+    if (!g.members) warn = "empty";
+    else if (g.with_skill_md < g.members) warn = (g.members - g.with_skill_md) + " missing SKILL.md";
+    if (g.loose_files) warn += (warn ? ", " : "") + g.loose_files + " loose files not in any skill";
+    chip.innerHTML =
+      esc(g.name) + "/ · " + g.members + (g.members === 1 ? " skill" : " skills") +
+      (warn ? ' <span class="warn">⚠ ' + esc(warn) + "</span>" : "") +
+      (!g.members && !g.loose_files
+        ? ` <a href="#" onclick="removeGroup('${g.name}');return false" title="remove empty group">×</a>`
+        : "");
+    el.appendChild(chip);
+  }
+}
+
+async function removeGroup(name) {
+  try {
+    await api("/api/group-remove", { name });
+    toast("group " + name + "/ removed");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
 function render() {
   renderLink();
+  renderGroups();
   const q = document.getElementById("q").value.toLowerCase();
   for (const scope of ["active", "archived"]) {
     const items = DATA[scope].filter(
@@ -492,7 +583,9 @@ async function uploadSkill(ev) {
   }
   try {
     const r = await api("/api/upload", { name: name.trim(), files: payload });
-    toast("imported " + r.path + " (" + r.files + " files)");
+    toast(r.kind === "group"
+      ? "imported " + r.path + "/ as a group — " + r.skills + " skill" + (r.skills === 1 ? "" : "s") + " linked"
+      : "imported " + r.path + " (" + r.files + " files)");
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -528,6 +621,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, {"active": scan(SKILLS, "active"),
                             "archived": scan(ARCHIVE, "archived"),
                             "groups": sorted(e.name for e in SKILLS.iterdir() if is_group(e)),
+                            "group_info": group_info(),
                             "link": link_status()})
         else:
             self.send(404, {"error": "not found"})
@@ -618,6 +712,14 @@ class Handler(BaseHTTPRequestHandler):
                 if gdir.exists() or gdir.is_symlink():
                     raise ValueError(f"{name}: already exists")
                 gdir.mkdir()
+            elif self.path == "/api/group-remove":
+                gdir = resolve("active", name)
+                if not is_group(gdir):
+                    raise ValueError(f"{name}: not a group")
+                try:
+                    gdir.rmdir()
+                except OSError:
+                    raise ValueError(f"{name}: not empty") from None
             elif self.path == "/api/link":
                 backup = set_up_link()
                 self.send(200, {"ok": True, "backup": backup})
@@ -641,6 +743,8 @@ class Handler(BaseHTTPRequestHandler):
                     staged.append((Path(*parts), data))
                 if not staged:
                     raise ValueError("no files in upload")
+                staged = normalize_upload(staged)
+                kind, nskills = classify_upload(staged)
                 try:
                     for rel, data in staged:
                         dest = path / rel
@@ -651,6 +755,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise
                 reconcile_links()
                 self.send(200, {"ok": True, "files": len(staged),
+                                "kind": kind, "skills": nskills,
                                 "path": str(path.relative_to(REPO))})
                 return
             elif self.path == "/api/new":
