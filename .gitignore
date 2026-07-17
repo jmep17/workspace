@@ -1,12 +1,11 @@
 .serena/
 .claude-ui.json
 
-# The "work" folder stays uncommitted in every config type
-skills/work/
+# The private "work" collection and its bridge links stay uncommitted
+/work/
 skills/work-*
-commands/work/
-agents/work/
-archive/skills/work/
+skills/work/
+commands/work
+agents/work
+archive/*/work/
 archive/skills/work-*
-archive/commands/work/
-archive/agents/work/
