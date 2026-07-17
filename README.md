@@ -90,11 +90,17 @@ its content stays out of this repo — keep `~/work-skills` in its own
 
 `bin/skills-ui` (Python stdlib, no deps) serves a local gruvbox-styled page
 at `http://127.0.0.1:7333` for managing skills: archive, restore, delete,
-scaffold a new one, filter, and spot problems (broken symlinks, missing
-`SKILL.md`). Archiving moves a skill to `archive/`, which Claude Code
-doesn't scan, so it stops loading everywhere; restore moves it back. Moves
-are plain renames on disk — review and commit them with git as usual
-(archived `work-*` skills stay gitignored).
+upload a skill folder from disk, scaffold a new one, filter, and spot
+problems (broken symlinks, missing `SKILL.md`). Archiving moves a skill to
+`archive/`, which Claude Code doesn't scan, so it stops loading everywhere;
+restore moves it back. Moves are plain renames on disk — review and commit
+them with git as usual (`work-*` skills stay gitignored).
+
+A banner at the top shows whether `~/.claude/skills` points at this repo;
+if not, a **link now** button sets up the symlink from step 2 for you
+(an existing real directory is backed up to `~/.claude/skills.bak` first).
+**⇪ upload** imports a folder via the browser's directory picker — name it
+`work-*` at the prompt to keep it out of git.
 
 ## Keybinding model
 
