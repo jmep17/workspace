@@ -1,7 +1,8 @@
 # Workspace
 
-Personal workspace repo; currently home to a hand-rolled Neovim configuration
-built greenfield for ownership and understanding.
+Personal workspace repo; home to a hand-rolled Neovim configuration built
+greenfield for ownership and understanding, plus matching terminal configs
+(`tmux/`, `ghostty/`) bootstrapped the same way — symlinked into `~/.config`.
 
 ## Language
 
