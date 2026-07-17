@@ -1156,12 +1156,7 @@ PAGE = """<!doctype html>
   <details id="links" open>
     <summary>links <span id="linksum"></span></summary>
     <div id="linkrows"></div>
-    <div class="cfgdir">
-      <span>config dir</span>
-      <input type="text" id="cfgdir" placeholder="~/.claude">
-      <button class="small" onclick="saveCfgDir()">set</button>
-      <button class="small" onclick="resetCfgDir()">reset</button>
-    </div>
+    <div class="cfgdir" id="cfgrow"></div>
     <div class="cfgdir hint" id="cfghint"></div>
   </details>
   <details id="help">
@@ -1291,7 +1286,21 @@ function renderLinks() {
   document.getElementById("linksum").innerHTML =
     ` — <span class="ok">${ok} linked</span>` + (warn ? `, <span class="warn">${warn} need attention</span>` : "");
   document.getElementById("cfgprefix").textContent = DATA.config_dir.replace(/\\/?$/, "/");
-  document.getElementById("cfgdir").placeholder = DATA.config_dir;
+  const row = document.getElementById("cfgrow");
+  if (CFGEDIT) {
+    row.innerHTML =
+      `<span>config dir</span>` +
+      `<input type="text" id="cfgdir" value="${esc(DATA.config_dir)}">` +
+      `<button class="small" onclick="saveCfgDir()">save</button>` +
+      `<button class="small" onclick="CFGEDIT=false;render()">cancel</button>`;
+  } else {
+    row.innerHTML =
+      `<span>links are managed in <b>${esc(DATA.config_dir)}</b>` +
+      (DATA.default_dir ? " (the default — Claude Code reads this automatically)" : "") +
+      `</span><span style="flex:1"></span>` +
+      `<button class="small" onclick="CFGEDIT=true;render()">change…</button>` +
+      (DATA.default_dir ? "" : `<button class="small" onclick="resetCfgDir()">reset to default</button>`);
+  }
   document.getElementById("cfghint").textContent = DATA.default_dir
     ? "" : "non-default config dir: Claude Code only uses it if CLAUDE_CONFIG_DIR is exported in your shell";
 }
@@ -1318,10 +1327,13 @@ async function doUnlink(id) {
   catch (e) { toast(e.message, true); }
 }
 
+let CFGEDIT = false;
+
 async function saveCfgDir() {
+  const v = document.getElementById("cfgdir").value.trim();
   try {
-    await api("/api/config-dir", { path: document.getElementById("cfgdir").value.trim() });
-    document.getElementById("cfgdir").value = "";
+    await api("/api/config-dir", { path: v === DATA.config_dir ? "" : v });
+    CFGEDIT = false;
     toast("config dir updated");
     await refresh();
   } catch (e) { toast(e.message, true); }
