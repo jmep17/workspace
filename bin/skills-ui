@@ -8,6 +8,7 @@ archive, restore, delete, and scaffolding a new skill. Stdlib only.
 """
 
 import argparse
+import base64
 import json
 import re
 import shutil
@@ -19,6 +20,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SKILLS = REPO / "skills"
 ARCHIVE = REPO / "archive"
+CLAUDE_SKILLS = Path.home() / ".claude" / "skills"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -81,6 +83,42 @@ def scan(root, scope):
             "path": str(entry),
         })
     return items
+
+
+def link_status():
+    """How ~/.claude/skills relates to this repo's skills/ directory."""
+    home = str(Path.home())
+    shown = str(CLAUDE_SKILLS).replace(home, "~", 1)
+    info = {"path": shown, "repo_skills": str(SKILLS)}
+    if CLAUDE_SKILLS.is_symlink():
+        if CLAUDE_SKILLS.resolve() == SKILLS.resolve():
+            info["status"] = "linked"
+        else:
+            info["status"] = "wrong-target"
+            info["target"] = str(CLAUDE_SKILLS.readlink())
+    elif CLAUDE_SKILLS.is_dir():
+        info["status"] = "real-dir"
+    else:
+        info["status"] = "missing"
+    return info
+
+
+def set_up_link():
+    """Point ~/.claude/skills at this repo's skills/. Returns backup path or None."""
+    CLAUDE_SKILLS.parent.mkdir(parents=True, exist_ok=True)
+    backup = None
+    if CLAUDE_SKILLS.is_symlink():
+        CLAUDE_SKILLS.unlink()
+    elif CLAUDE_SKILLS.exists():
+        n = 0
+        while True:
+            backup = CLAUDE_SKILLS.with_name("skills.bak" + (str(n) if n else ""))
+            if not (backup.exists() or backup.is_symlink()):
+                break
+            n += 1
+        CLAUDE_SKILLS.rename(backup)
+    CLAUDE_SKILLS.symlink_to(SKILLS)
+    return str(backup) if backup else None
 
 
 def resolve(scope, name):
@@ -170,6 +208,13 @@ PAGE = """<!doctype html>
   .actions { display: flex; gap: .4rem; }
   .actions button { padding: .25rem .6rem; font-size: .72rem; }
   .empty { color: var(--bg2); padding: .65rem .75rem; font-size: .85rem; }
+  .banner {
+    display: flex; align-items: center; gap: .75rem; margin-bottom: 1.25rem;
+    padding: .55rem .75rem; border: 1px solid; border-radius: 6px; font-size: .82rem;
+  }
+  .banner.ok { color: var(--green); border-color: var(--bg2); }
+  .banner.warn { color: var(--orange); border-color: var(--orange); }
+  .banner .msg { flex: 1; }
   #toast {
     position: fixed; bottom: 1.25rem; left: 50%; translate: -50% 0;
     background: var(--bg2); color: var(--fg); padding: .6rem 1rem;
@@ -182,9 +227,12 @@ PAGE = """<!doctype html>
 <main>
   <h1>skills</h1>
   <p class="sub">Active skills load in Claude Code everywhere; archived ones sit in <b>archive/</b> and don't. Moves are plain renames — review &amp; commit with git as usual.</p>
+  <div id="link" class="banner" hidden></div>
   <div class="bar">
     <input type="search" id="q" placeholder="filter…" autofocus>
+    <button onclick="document.getElementById('up').click()">⇪ upload</button>
     <button class="primary" onclick="newSkill()">+ new skill</button>
+    <input type="file" id="up" webkitdirectory multiple hidden>
   </div>
   <h2>Active <span class="count" id="n-active"></span></h2>
   <div id="active"></div>
@@ -212,7 +260,37 @@ function toast(msg, err) {
   el._t = setTimeout(() => (el.className = ""), err ? 5000 : 2500);
 }
 
+function renderLink() {
+  const el = document.getElementById("link");
+  const l = DATA.link;
+  if (!l) { el.hidden = true; return; }
+  el.hidden = false;
+  const btn = '<button onclick="doLink()">link now</button>';
+  if (l.status === "linked") {
+    el.className = "banner ok";
+    el.innerHTML = `<span class="msg">✓ ${l.path} → this repo — skills load in Claude Code on this machine</span>`;
+  } else if (l.status === "missing") {
+    el.className = "banner warn";
+    el.innerHTML = `<span class="msg">${l.path} is not set up — Claude Code won't see these skills</span>${btn}`;
+  } else if (l.status === "wrong-target") {
+    el.className = "banner warn";
+    el.innerHTML = `<span class="msg">${l.path} points elsewhere (${esc(l.target)})</span>${btn}`;
+  } else {
+    el.className = "banner warn";
+    el.innerHTML = `<span class="msg">${l.path} is a real directory — link it here (existing dir is backed up first)</span>${btn}`;
+  }
+}
+
+async function doLink() {
+  try {
+    const r = await api("/api/link", {});
+    toast(r.backup ? "linked — previous directory saved at " + r.backup : "linked");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
 function render() {
+  renderLink();
   const q = document.getElementById("q").value.toLowerCase();
   for (const scope of ["active", "archived"]) {
     const items = DATA[scope].filter(
@@ -280,6 +358,32 @@ async function newSkill() {
   } catch (e) { toast(e.message, true); }
 }
 
+async function uploadSkill(ev) {
+  const files = [...ev.target.files].filter(
+    (f) => !/(^|\/)(\.git|node_modules)(\/|$)|(^|\/)\.DS_Store$/.test(f.webkitRelativePath)
+  );
+  ev.target.value = "";
+  if (!files.length) return;
+  const root = files[0].webkitRelativePath.split("/")[0];
+  const name = prompt("Import as (prefix work- to keep it out of git):", root);
+  if (!name) return;
+  const payload = [];
+  for (const f of files) {
+    const rel = f.webkitRelativePath.split("/").slice(1).join("/");
+    if (!rel) continue;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = "";
+    for (const b of buf) bin += String.fromCharCode(b);
+    payload.push({ path: rel, content_b64: btoa(bin) });
+  }
+  try {
+    const r = await api("/api/upload", { name: name.trim(), files: payload });
+    toast("imported " + r.path + " (" + r.files + " files)");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+document.getElementById("up").addEventListener("change", uploadSkill);
 document.getElementById("q").addEventListener("input", render);
 refresh();
 </script>
@@ -307,7 +411,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, PAGE, "text/html; charset=utf-8")
         elif self.path == "/api/skills":
             self.send(200, {"active": scan(SKILLS, "active"),
-                            "archived": scan(ARCHIVE, "archived")})
+                            "archived": scan(ARCHIVE, "archived"),
+                            "link": link_status()})
         else:
             self.send(404, {"error": "not found"})
 
@@ -327,6 +432,39 @@ class Handler(BaseHTTPRequestHandler):
                     shutil.rmtree(path)
                 else:
                     raise ValueError(f"{name}: not found")
+            elif self.path == "/api/link":
+                backup = set_up_link()
+                self.send(200, {"ok": True, "backup": backup})
+                return
+            elif self.path == "/api/upload":
+                path = resolve("active", name)
+                if path.exists() or path.is_symlink():
+                    raise ValueError(f"{name}: already exists")
+                staged = []
+                total = 0
+                for f in req.get("files") or []:
+                    rel = f.get("path", "")
+                    parts = [p for p in rel.split("/") if p]
+                    if not parts or rel.startswith("/") or ".." in parts:
+                        raise ValueError(f"bad file path in upload: {rel}")
+                    data = base64.b64decode(f.get("content_b64", ""))
+                    total += len(data)
+                    if total > 20 * 1024 * 1024:
+                        raise ValueError("upload too large (>20 MB)")
+                    staged.append((Path(*parts), data))
+                if not staged:
+                    raise ValueError("no files in upload")
+                try:
+                    for rel, data in staged:
+                        dest = path / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(data)
+                except OSError:
+                    shutil.rmtree(path, ignore_errors=True)
+                    raise
+                self.send(200, {"ok": True, "files": len(staged),
+                                "path": str(path.relative_to(REPO))})
+                return
             elif self.path == "/api/new":
                 path = resolve("active", name)
                 if path.exists() or path.is_symlink():
