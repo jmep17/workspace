@@ -112,6 +112,11 @@ ordered by impact-vs-effort within each group.
 
 ## Round 2 — toward an incredible config manager
 
+Wave 1 landed (2026-07-19): #29 context-budget dashboard + #30 transcript
+usage analytics (insight tab), #32 doctor tab with fix actions, #43
+CSRF/rebinding hardening (per-run POST token + Host validation), and #47
+command palette (Ctrl/⌘-K). Remaining waves still open.
+
 Ambition level up: not just "manage the files" but own the whole config
 lifecycle — insight, authoring, distribution, and safety. Grouped by theme;
 ★ marks the ideas that would most differentiate the tool.

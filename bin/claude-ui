@@ -34,9 +34,11 @@ import errno
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -77,6 +79,10 @@ COLLECTION_MARKERS = ("skills", "commands", "agents", "output-styles",
 
 MCP_FILE = "mcp-servers.json"
 CLAUDE_JSON = Path.home() / ".claude.json"  # user-scope mcpServers live here
+
+# Per-run token: POSTs must echo it back, so a random webpage doing
+# cross-origin/DNS-rebinding requests against 127.0.0.1 can't mutate config.
+TOKEN = secrets.token_hex(16)
 
 
 def collections():
@@ -1689,6 +1695,301 @@ def mcp_test(name):
         return {"ok": False, "detail": str(getattr(e, "reason", e) or e)}
 
 
+# ---------------------------------------------------------------- insight
+# Context budget: Claude Code injects CLAUDE.md wholesale plus every active
+# item's name+description into each session, so that's what gets estimated
+# (chars/4). Usage comes from the local session transcripts.
+
+def _tok(s):
+    return (len(s) + 3) // 4 if s else 0
+
+
+def insight_budget():
+    claude_md = mapping_repo("CLAUDE.md")
+    md_tok = _tok(claude_md.read_text(errors="replace")) if claude_md.is_file() else 0
+    per_type = {}
+    for t, spec in TYPES.items():
+        items = (scan_skills(SKILLS, "active") if spec["kind"] == "dir"
+                 else scan_md(t, "active"))
+        rows = [{"name": it["name"],
+                 "tokens": _tok(it["name"]) + _tok(it.get("description", ""))}
+                for it in items if not it.get("broken")]
+        rows.sort(key=lambda r: -r["tokens"])
+        per_type[t] = {"tokens": sum(r["tokens"] for r in rows), "items": rows}
+    return {"claude_md": md_tok, "types": per_type,
+            "total": md_tok + sum(v["tokens"] for v in per_type.values())}
+
+
+USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CMD_RE = re.compile(r"<command-name>/?([A-Za-z0-9:_.\/-]+)</command-name>")
+MAX_TRANSCRIPT = 64 * 1024 * 1024
+
+
+def _scan_transcript(path):
+    """One transcript -> {'kind\\tname': [count, last_iso_ts]}."""
+    counts = {}
+
+    def bump(kind, name, ts):
+        k = kind + "\t" + name
+        c = counts.get(k)
+        if c:
+            c[0] += 1
+            c[1] = max(c[1], ts)
+        else:
+            counts[k] = [1, ts]
+
+    def texts(content):
+        if isinstance(content, str):
+            yield content
+        for b in content if isinstance(content, list) else []:
+            if isinstance(b, dict) and b.get("type") == "text":
+                yield b.get("text") or ""
+
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if ("command-name" not in line and '"Skill"' not in line
+                        and '"Task"' not in line):
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = d.get("timestamp") or ""
+                content = (d.get("message") or {}).get("content")
+                for text in texts(content):
+                    for m in CMD_RE.finditer(text):
+                        bump("command", m.group(1).replace(":", "/"), ts)
+                for b in content if isinstance(content, list) else []:
+                    if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                        continue
+                    inp = b.get("input") or {}
+                    if b.get("name") == "Skill" and inp.get("skill"):
+                        bump("skill", str(inp["skill"]), ts)
+                    elif b.get("name") == "Task" and inp.get("subagent_type"):
+                        bump("agent", str(inp["subagent_type"]), ts)
+    except OSError:
+        return {}
+    return counts
+
+
+def usage_stats(rescan=False):
+    """Aggregate usage across all transcripts, incrementally cached by
+    (mtime, size) per file so only new/changed sessions are re-read."""
+    cache = {}
+    if not rescan and USAGE_CACHE.is_file():
+        try:
+            cache = json.loads(USAGE_CACHE.read_text())
+        except (json.JSONDecodeError, OSError):
+            cache = {}
+    files = cache.get("files") or {}
+    seen = set()
+    scanned = 0
+    if PROJECTS_DIR.is_dir():
+        for p in PROJECTS_DIR.rglob("*.jsonl"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if st.st_size > MAX_TRANSCRIPT:
+                continue
+            key = str(p)
+            seen.add(key)
+            sig = [int(st.st_mtime), st.st_size]
+            if files.get(key, {}).get("sig") != sig:
+                files[key] = {"sig": sig, "counts": _scan_transcript(p)}
+                scanned += 1
+    for key in list(files):
+        if key not in seen:
+            del files[key]
+    if scanned or set(files) != seen:
+        try:
+            USAGE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            USAGE_CACHE.write_text(json.dumps({"files": files}))
+        except OSError:
+            pass
+    total = {}
+    for f in files.values():
+        for k, (n, ts) in (f.get("counts") or {}).items():
+            kind, _, name = k.partition("\t")
+            slot = total.setdefault(kind, {}).setdefault(
+                name, {"count": 0, "last": ""})
+            slot["count"] += n
+            slot["last"] = max(slot["last"], ts)
+    return {"sessions": len(files), "scanned_now": scanned, "by": total,
+            "dir": str(PROJECTS_DIR).replace(str(Path.home()), "~", 1),
+            "available": PROJECTS_DIR.is_dir()}
+
+
+# ---------------------------------------------------------------- doctor
+
+def _first_cmd_word(cmd):
+    return (cmd or "").strip().split()[0] if (cmd or "").strip() else ""
+
+
+def _cmd_missing(cmd):
+    """True if a hook/statusline command's executable clearly doesn't exist."""
+    word = os.path.expanduser(_first_cmd_word(cmd))
+    if not word or any(c in word for c in "$`("):  # shell expr — can't judge
+        return False
+    if word.startswith(("/", ".")) or os.sep in word:
+        return not os.path.exists(word)
+    return shutil.which(word) is None
+
+
+def doctor():
+    finds = []
+
+    def add(level, area, msg, fix=None):
+        finds.append({"level": level, "area": area, "msg": msg, "fix": fix})
+
+    cfg = config_dir()
+    home = str(Path.home())
+
+    # leftover *.bak from linking
+    if cfg.is_dir():
+        for p in sorted(cfg.glob("*.bak*")):
+            add("warn", "links",
+                f"{str(p).replace(home, '~', 1)} — backup left behind by a "
+                "link operation; delete once you're sure",
+                {"action": "delete-bak", "path": str(p)})
+        # broken symlinks in the config dir itself
+        for p in sorted(cfg.iterdir()):
+            if p.is_symlink() and not p.exists():
+                add("warn", "links",
+                    f"{str(p).replace(home, '~', 1)} — broken symlink "
+                    f"(points at {p.readlink()})",
+                    {"action": "rm-broken-link", "path": str(p)})
+
+    # link rows needing attention
+    for row in link_state():
+        if row["status"] in ("elsewhere", "missing", "real", "adopt"):
+            add("info", "links",
+                f"{row['target']}: {row['status']} — see the links panel")
+
+    # group bridge collisions: a real dir shadowing a would-be managed link
+    for g, d in skill_groups_map().items():
+        if not d.is_dir():
+            continue
+        for x in d.iterdir():
+            if x.is_dir() and not x.name.startswith("."):
+                link = SKILLS / f"{g}-{x.name}"
+                if link.exists() and not link.is_symlink():
+                    add("warn", "skills",
+                        f"skills/{g}-{x.name} exists as a real dir and shadows "
+                        f"the {g}/{x.name} bridge link")
+
+    # settings.json: hooks / statusLine pointing at missing executables
+    sdata = settings_state()["data"]
+    hooks = sdata.get("hooks")
+    if isinstance(hooks, dict):
+        for event, matchers in hooks.items():
+            for m in matchers if isinstance(matchers, list) else []:
+                for h in (m.get("hooks") or []) if isinstance(m, dict) else []:
+                    cmd = h.get("command") if isinstance(h, dict) else None
+                    if cmd and _cmd_missing(cmd):
+                        add("warn", "settings",
+                            f"hooks.{event}: command not found: {_first_cmd_word(cmd)}")
+    sl = sdata.get("statusLine")
+    if isinstance(sl, dict) and sl.get("command") and _cmd_missing(sl["command"]):
+        add("warn", "settings",
+            f"statusLine.command not found: {_first_cmd_word(sl['command'])}")
+
+    # settings keys outside the documented schema
+    known = {s["key"].split(".")[0] for s in SETTINGS_SCHEMA}
+    for k in sdata if isinstance(sdata, dict) else {}:
+        if k not in known:
+            add("info", "settings", f"settings.json key not in the documented "
+                                    f"schema: {k}")
+
+    # MCP: stdio commands that don't resolve on this machine
+    for s in mcp_state()["servers"]:
+        cmd = (s["config"] or {}).get("command")
+        if cmd and _cmd_missing(cmd):
+            add("warn", "mcp", f"{s['name']}: command not found: {cmd}")
+
+    # statusline drift: script on disk differs from what the saved config
+    # would generate (hand edits get overwritten on the next UI save)
+    _, cfgp, scriptp = statusline_paths()
+    if cfgp.is_file() and scriptp.is_file():
+        saved, err = _read_json_object(cfgp)
+        if not err and saved:
+            expected = STATUSLINE_SCRIPT.replace(
+                "__CONFIG__", json.dumps(json.dumps(saved)))
+            if scriptp.read_text(errors="replace") != expected:
+                add("warn", "statusline",
+                    f"{scriptp.relative_to(REPO)} differs from the saved "
+                    "statusline config — hand edits are lost on the next UI save")
+
+    # item quality
+    for t, spec in TYPES.items():
+        items = (scan_skills(SKILLS, "active") if spec["kind"] == "dir"
+                 else scan_md(t, "active"))
+        for it in items:
+            if it.get("broken"):
+                add("warn", t, f"{it['name']}: broken symlink")
+            if it.get("incomplete"):
+                add("warn", t, f"{it['name']}: missing SKILL.md")
+            if it.get("todo"):
+                add("info", t, f"{it['name']}: leftover TODO placeholder")
+            if it.get("name_mismatch"):
+                add("info", t, f"{it['name']}: frontmatter name doesn't match "
+                               "the folder name")
+            if it.get("long_desc"):
+                add("info", t, f"{it['name']}: description over 1024 chars")
+            if (t == "skills" and it.get("description")
+                    and "use when" not in it["description"].lower()
+                    and not it.get("todo")):
+                add("info", t, f"{it['name']}: description has no \"Use when …\" "
+                               "trigger — Claude may not know when to load it")
+
+    # archive entries that collide with active names (restore would fail)
+    for t, spec in TYPES.items():
+        archived = (scan_skills(SK_ARCHIVE, "archived") if spec["kind"] == "dir"
+                    else scan_md(t, "archived"))
+        active = {i["name"] for i in
+                  (scan_skills(SKILLS, "active") if spec["kind"] == "dir"
+                   else scan_md(t, "active"))}
+        for it in archived:
+            if it["name"] in active:
+                add("info", t, f"{it['name']}: exists in both active and "
+                               "archive — restore would fail")
+
+    order = {"warn": 0, "info": 1}
+    finds.sort(key=lambda f: (order[f["level"]], f["area"]))
+    return {"findings": finds,
+            "warns": sum(1 for f in finds if f["level"] == "warn"),
+            "ts": time.strftime("%H:%M:%S")}
+
+
+def doctor_fix(action, path):
+    p = Path(path)
+    cfg = config_dir().resolve()
+    try:
+        inside = p.resolve(strict=False).is_relative_to(cfg)
+    except OSError:
+        inside = False
+    parent_ok = p.parent.resolve() == cfg if p.parent.exists() else False
+    if not (inside or parent_ok):
+        raise ValueError("path is outside the config dir")
+    if action == "delete-bak":
+        if ".bak" not in p.name:
+            raise ValueError("not a .bak path")
+        if p.is_symlink() or p.is_file():
+            p.unlink()
+        elif p.is_dir():
+            shutil.rmtree(p)
+        else:
+            raise ValueError(f"{p}: not found")
+    elif action == "rm-broken-link":
+        if not (p.is_symlink() and not p.exists()):
+            raise ValueError(f"{p}: not a broken symlink")
+        p.unlink()
+    else:
+        raise ValueError("unknown fix action")
+
+
 SKILL_TEMPLATE = """---
 name: {name}
 description: TODO — one sentence on what this does, then "Use when ..." triggers.
@@ -1975,6 +2276,53 @@ PAGE = """<!doctype html>
     margin-top: .9rem; flex-wrap: wrap; }
   .ftabs { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .6rem; }
   .ftabs button.on { color: var(--yellow); border-color: var(--yellow); }
+  .tiles { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .tile { border: 1px solid var(--bg2); border-radius: 8px; padding: .55rem .8rem;
+    flex: 1 1 9rem; min-width: 8rem; }
+  .tile .tnum { font-size: 1.25rem; font-weight: bold; color: var(--yellow);
+    overflow-wrap: anywhere; }
+  .tile .tlbl { color: var(--fg2); font-size: .7rem; text-transform: uppercase;
+    letter-spacing: .08em; }
+  .budgetbar { display: flex; height: 1.4rem; border-radius: 6px; overflow: hidden;
+    border: 1px solid var(--bg2); margin-bottom: .4rem; }
+  .budgetbar div { min-width: 2px; }
+  .budgetkey { display: flex; gap: .9rem; flex-wrap: wrap; font-size: .72rem;
+    color: var(--fg2); margin-bottom: 1.2rem; }
+  .budgetkey .sw { display: inline-block; width: .7rem; height: .7rem;
+    border-radius: 3px; margin-right: .3rem; vertical-align: -1px; }
+  .itable { width: 100%; border-collapse: collapse; font-size: .8rem;
+    margin-bottom: 1.2rem; }
+  .itable th { text-align: left; color: var(--fg2); font-weight: normal;
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .08em;
+    padding: .25rem .5rem; border-bottom: 1px solid var(--bg2); }
+  .itable td { padding: .3rem .5rem; border-bottom: 1px solid var(--bg1);
+    overflow-wrap: anywhere; }
+  .itable td.num { text-align: right; white-space: nowrap; color: var(--orange); }
+  .itable td.dim { color: var(--fg2); }
+  .drow { display: flex; gap: .6rem; padding: .45rem .5rem; align-items: baseline;
+    border-bottom: 1px solid var(--bg1); font-size: .82rem; flex-wrap: wrap; }
+  .drow .dmsg { flex: 1; min-width: 12rem; overflow-wrap: anywhere; }
+  #palette { position: fixed; inset: 0; background: var(--shadow); z-index: 25;
+    display: flex; justify-content: center; align-items: flex-start;
+    padding: 10vh 1rem 1rem; }
+  #palette[hidden] { display: none; }
+  .palbox { background: var(--bg); border: 1px solid var(--bg2); border-radius: 10px;
+    width: 100%; max-width: 34rem; box-shadow: 0 8px 30px var(--shadow);
+    overflow: hidden; }
+  .palbox input { width: 100%; border: 0; border-bottom: 1px solid var(--bg2);
+    border-radius: 0; background: var(--bg); color: var(--fg);
+    padding: .7rem .9rem; font: inherit; }
+  .palbox input:focus { outline: none; }
+  .pallist { max-height: 50vh; overflow-y: auto; }
+  .palrow { display: flex; gap: .6rem; padding: .45rem .9rem; cursor: pointer;
+    align-items: baseline; font-size: .85rem; }
+  .palrow.sel, .palrow:hover { background: var(--bg1); }
+  .palrow .pk { color: var(--fg2); font-size: .68rem; text-transform: uppercase;
+    letter-spacing: .08em; min-width: 5.5rem; }
+  .palrow .pl { overflow-wrap: anywhere; }
+  .palrow .ph { color: var(--fg2); font-size: .72rem; flex: 1; text-align: right;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 3rem; }
+  .palempty { padding: .7rem .9rem; color: var(--fg2); font-size: .8rem; }
 </style>
 <main>
   <div class="head">
@@ -1982,7 +2330,7 @@ PAGE = """<!doctype html>
     <span class="spring"></span>
     <button class="small" id="themebtn" title="toggle light/dark theme">◐ theme</button>
   </div>
-  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Collections (like <b>work/</b>, gitignored) mirror the same shape and merge in automatically. Everything is plain files: review &amp; commit with git — or use the git panel below.</p>
+  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Collections (like <b>work/</b>, gitignored) mirror the same shape and merge in automatically. Everything is plain files: review &amp; commit with git — or use the git panel below. <b>Ctrl/⌘-K</b> opens the command palette.</p>
   <details id="links">
     <summary>links <span id="linksum"></span></summary>
     <div id="linkrows"></div>
@@ -2057,6 +2405,8 @@ PAGE = """<!doctype html>
   <div id="mcpview" hidden></div>
   <div id="stlview" hidden></div>
   <div id="settingsview" hidden></div>
+  <div id="insightview" hidden></div>
+  <div id="doctorview" hidden></div>
   <div id="itemsview">
   <div class="bar">
     <input type="search" id="q" placeholder="filter…  ( / )" autofocus>
@@ -2080,14 +2430,19 @@ PAGE = """<!doctype html>
 </main>
 <div id="toasts"></div>
 <div id="modal" hidden></div>
+<div id="palette" hidden></div>
 <script>
 let DATA = { types: {}, links: [], config_dir: "", collections: [] };
 let TAB = location.hash.slice(1) || "skills";
 let SORT = "name";
 
+const TOKEN = "__TOKEN__";
+
 async function api(path, body) {
   const res = await fetch(path, body
-    ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
+    ? { method: "POST",
+        headers: { "content-type": "application/json", "x-claude-ui": TOKEN },
+        body: JSON.stringify(body) }
     : {});
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error || res.statusText);
@@ -2426,10 +2781,13 @@ async function resetCfgDir() {
   catch (e) { toast(e.message, true); }
 }
 
+const EXTRA_TABS = ["mcp", "statusline", "settings", "insight", "doctor"];
+const allTabs = () => [...Object.keys(DATA.types), ...EXTRA_TABS];
+
 function renderTabs() {
   const el = document.getElementById("tabs");
   el.innerHTML = "";
-  for (const t of [...Object.keys(DATA.types), "mcp", "statusline", "settings"]) {
+  for (const t of allTabs()) {
     const b = document.createElement("button");
     b.textContent = t === "settings"
       ? "settings · " + Object.keys((DATA.settings || {}).data || {}).length
@@ -2437,6 +2795,10 @@ function renderTabs() {
       ? "mcp · " + ((DATA.mcp || {}).servers || []).length
       : t === "statusline"
       ? "statusline" + ((DATA.statusline || {}).applied ? " ✓" : "")
+      : t === "insight"
+      ? "insight"
+      : t === "doctor"
+      ? "doctor" + (DOCTOR && DOCTOR.warns ? " · " + DOCTOR.warns + "⚠" : "")
       : t + " · " + DATA.types[t].active.length;
     b.className = t === TAB ? "on" : "";
     b.onclick = () => { TAB = t; location.hash = t; render(); };
@@ -3249,6 +3611,326 @@ async function saveSetting(key, type, raw) {
   } catch (e) { toast(e.message, true); }
 }
 
+let INSIGHT = null;
+let DOCTOR = null;
+
+const BUDGET_COLORS = { "CLAUDE.md": "var(--yellow)", skills: "var(--aqua)",
+  commands: "var(--blue)", agents: "var(--purple)",
+  "output-styles": "var(--orange)" };
+const USAGE_KIND = { skills: "skill", commands: "command", agents: "agent" };
+
+function tokfmt(n) {
+  if (n < 1000) return String(n);
+  let s = (n / 1000).toFixed(1);
+  if (s.endsWith(".0")) s = s.slice(0, -2);
+  return s + "k";
+}
+
+function relTime(iso) {
+  if (!iso) return "never";
+  const d = Date.now() - Date.parse(iso);
+  if (!isFinite(d)) return iso;
+  const day = 86400000;
+  if (d < 3600000) return Math.max(1, Math.round(d / 60000)) + "m ago";
+  if (d < day) return Math.round(d / 3600000) + "h ago";
+  if (d < 30 * day) return Math.round(d / day) + "d ago";
+  return Math.round(d / (30 * day)) + "mo ago";
+}
+
+async function renderInsight(rescan) {
+  const el = document.getElementById("insightview");
+  if (!INSIGHT || rescan) {
+    el.innerHTML = '<div class="empty">estimating context cost and scanning session transcripts…</div>';
+    try { INSIGHT = await api("/api/insight" + (rescan ? "?rescan" : "")); }
+    catch (e) {
+      el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>";
+      return;
+    }
+    if (TAB !== "insight") return;
+  }
+  const b = INSIGHT.budget, u = INSIGHT.usage;
+  el.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "sethead";
+  head.innerHTML =
+    "what your config costs at the start of <i>every</i> session " +
+    "(chars÷4 estimate — CLAUDE.md is injected wholesale, each active item " +
+    "contributes its name + description), and what actually gets used " +
+    "(session transcripts in <b>" + esc(u.dir) + "</b>, parsed locally)";
+  el.appendChild(head);
+
+  const used = u.by || {};
+  const now = Date.now();
+  const unused = [];
+  for (const [t, kind] of Object.entries(USAGE_KIND)) {
+    for (const s of (DATA.types[t] || {}).active || []) {
+      const rec = (used[kind] || {})[s.name];
+      const last = rec && rec.last ? Date.parse(rec.last) : 0;
+      if (!last || now - last > 90 * 86400000)
+        unused.push({ type: t, name: s.name, last });
+    }
+  }
+
+  const tiles = document.createElement("div");
+  tiles.className = "tiles";
+  const tile = (num, lbl) =>
+    `<div class="tile"><div class="tnum">${num}</div><div class="tlbl">${lbl}</div></div>`;
+  tiles.innerHTML =
+    tile(tokfmt(b.total), "tokens every session") +
+    tile(tokfmt(b.claude_md), "CLAUDE.md") +
+    tile(tokfmt((b.types.skills || {}).tokens || 0), "skill descriptions") +
+    (u.available ? tile(u.sessions, "sessions scanned") : "") +
+    (u.available && u.sessions ? tile(unused.length, "unused 90d+") : "");
+  el.appendChild(tiles);
+
+  const segs = [["CLAUDE.md", b.claude_md],
+    ...Object.entries(b.types).map(([t, v]) => [t, v.tokens])];
+  const bar = document.createElement("div");
+  bar.className = "budgetbar";
+  const key = document.createElement("div");
+  key.className = "budgetkey";
+  for (const [name, tok] of segs) {
+    if (!tok) continue;
+    const d = document.createElement("div");
+    d.style.flex = String(tok);
+    d.style.background = BUDGET_COLORS[name] || "var(--fg2)";
+    d.title = name + ": ~" + tokfmt(tok) + " tokens";
+    bar.appendChild(d);
+    const k = document.createElement("span");
+    k.innerHTML = `<span class="sw" style="background:${BUDGET_COLORS[name] || "var(--fg2)"}"></span>` +
+      `${esc(name)} ~${tokfmt(tok)}`;
+    key.appendChild(k);
+  }
+  el.appendChild(bar);
+  el.appendChild(key);
+
+  const table = (title, headers, rows) => {
+    const h = document.createElement("h2");
+    h.textContent = title;
+    el.appendChild(h);
+    const t = document.createElement("table");
+    t.className = "itable";
+    t.innerHTML = "<tr>" + headers.map((x) => `<th>${x}</th>`).join("") + "</tr>";
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = r;
+      t.appendChild(tr);
+    }
+    el.appendChild(t);
+  };
+
+  const consumers = Object.entries(b.types)
+    .flatMap(([t, v]) => v.items.map((it) => ({ type: t, ...it })))
+    .sort((a, b2) => b2.tokens - a.tokens)
+    .slice(0, 12);
+  table("top context consumers", ["item", "type", "~tokens"],
+    consumers.map((c) =>
+      `<td>${esc(c.name)}</td><td class="dim">${esc(c.type)}</td>` +
+      `<td class="num">${tokfmt(c.tokens)}</td>`));
+
+  if (u.available && u.sessions) {
+    const rows = [];
+    for (const [kind, names] of Object.entries(used))
+      for (const [name, rec] of Object.entries(names))
+        rows.push({ kind, name, count: rec.count, last: rec.last });
+    rows.sort((a, b2) => b2.count - a.count);
+    table("most used (all transcripts)", ["name", "kind", "uses", "last used"],
+      rows.slice(0, 15).map((r) =>
+        `<td>${esc(r.name)}</td><td class="dim">${esc(r.kind)}</td>` +
+        `<td class="num">${r.count}</td><td class="dim">${esc(relTime(r.last))}</td>`));
+    if (unused.length)
+      table("unused in 90+ days — archive candidates", ["name", "type", "last used"],
+        unused.slice(0, 30).map((r) =>
+          `<td>${esc(r.name)}</td><td class="dim">${esc(r.type)}</td>` +
+          `<td class="dim">${r.last ? esc(relTime(new Date(r.last).toISOString())) : "never"}</td>`));
+  } else if (!u.available) {
+    const n = document.createElement("div");
+    n.className = "empty";
+    n.textContent = "no transcripts found at " + u.dir + " — usage analytics appear once Claude Code has recorded sessions on this machine";
+    el.appendChild(n);
+  }
+
+  const bar2 = document.createElement("div");
+  bar2.className = "bar";
+  const rb = document.createElement("button");
+  rb.className = "small";
+  rb.textContent = "rescan transcripts";
+  rb.title = "drop the cache and re-read every transcript" +
+    (u.scanned_now ? " (last run read " + u.scanned_now + " new file(s))" : "");
+  rb.onclick = () => renderInsight(true);
+  bar2.appendChild(rb);
+  el.appendChild(bar2);
+}
+
+async function renderDoctor(rerun) {
+  const el = document.getElementById("doctorview");
+  if (!DOCTOR || rerun) {
+    el.innerHTML = '<div class="empty">running checks…</div>';
+    try { DOCTOR = await api("/api/doctor"); }
+    catch (e) {
+      el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>";
+      return;
+    }
+    if (TAB !== "doctor") return;
+    renderTabs();
+  }
+  el.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "sethead";
+  const warns = DOCTOR.warns;
+  const infos = DOCTOR.findings.length - warns;
+  head.innerHTML =
+    (DOCTOR.findings.length
+      ? `<b>${warns}</b> warning${warns === 1 ? "" : "s"}, ${infos} note${infos === 1 ? "" : "s"}`
+      : '<span style="color:var(--green)">✓ nothing to report</span>') +
+    ` · checked at ${esc(DOCTOR.ts)}`;
+  el.appendChild(head);
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  const rb = document.createElement("button");
+  rb.className = "small";
+  rb.textContent = "run again";
+  rb.onclick = () => renderDoctor(true);
+  bar.appendChild(rb);
+  el.appendChild(bar);
+  for (const f of DOCTOR.findings) {
+    const row = document.createElement("div");
+    row.className = "drow";
+    row.innerHTML =
+      `<span class="badge ${f.level === "warn" ? "warn" : "link"}">${f.level}</span>` +
+      `<span class="badge group">${esc(f.area)}</span>` +
+      `<span class="dmsg">${esc(f.msg)}</span>`;
+    if (f.fix) {
+      const b = document.createElement("button");
+      b.className = "small danger";
+      b.textContent = "fix";
+      b.title = f.fix.action + " " + (f.fix.path || "");
+      b.onclick = async () => {
+        if (!(await mconfirm("apply fix", f.fix.action + ": " + (f.fix.path || ""), "fix"))) return;
+        try {
+          await api("/api/doctor-fix", f.fix);
+          toast("fixed");
+          renderDoctor(true);
+        } catch (e) { toast(e.message, true); }
+      };
+      row.appendChild(b);
+    }
+    el.appendChild(row);
+  }
+}
+
+// ------------------------------------------------------------- command palette
+
+let PAL = null;
+
+function palItems() {
+  const out = [];
+  for (const [t, d] of Object.entries(DATA.types || {}))
+    for (const s of d.active || [])
+      if (!s.broken)
+        out.push({ kind: t.replace(/s$/, ""), label: s.name,
+          hint: s.description || "",
+          run: () => openItemEditor("active", s.name, null, t) });
+  for (const t of allTabs())
+    out.push({ kind: "go to", label: t,
+      run: () => { TAB = t; location.hash = t; render(); } });
+  for (const t of Object.keys(DATA.types || {}))
+    out.push({ kind: "action", label: "new " + t.replace(/s$/, ""),
+      run: () => { TAB = t; location.hash = t; render(); newItem(); } });
+  out.push({ kind: "action", label: "toggle light/dark theme", run: toggleTheme });
+  out.push({ kind: "action", label: "apply all mcp servers", run: () => mcpApply("*") });
+  out.push({ kind: "action", label: "run doctor",
+    run: () => { TAB = "doctor"; location.hash = TAB; render(); renderDoctor(true); } });
+  out.push({ kind: "action", label: "rescan usage analytics",
+    run: () => { TAB = "insight"; location.hash = TAB; render(); renderInsight(true); } });
+  return out;
+}
+
+function fuzzy(q, s) {
+  s = s.toLowerCase();
+  let score = 0, i = 0;
+  for (const ch of q) {
+    const j = s.indexOf(ch, i);
+    if (j < 0) return -1;
+    score += (j === i ? 3 : 1) + (j === 0 ? 2 : 0);
+    i = j + 1;
+  }
+  return score - s.length / 100;
+}
+
+function palMatches() {
+  const q = PAL.q.trim().toLowerCase();
+  if (!q) return PAL.items.slice(0, 12);
+  return PAL.items
+    .map((it) => ({ it, s: fuzzy(q, it.kind + " " + it.label) }))
+    .filter((x) => x.s >= 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 12)
+    .map((x) => x.it);
+}
+
+function closePalette() {
+  PAL = null;
+  const p = document.getElementById("palette");
+  p.hidden = true;
+  p.innerHTML = "";
+}
+
+function openPalette() {
+  PAL = { q: "", sel: 0, items: palItems() };
+  const p = document.getElementById("palette");
+  p.hidden = false;
+  p.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "palbox";
+  const inp = document.createElement("input");
+  inp.placeholder = "jump to anything — items, tabs, actions…";
+  const listEl = document.createElement("div");
+  listEl.className = "pallist";
+  const renderList = () => {
+    const list = palMatches();
+    listEl.innerHTML = "";
+    if (!list.length) {
+      listEl.innerHTML = '<div class="palempty">no matches</div>';
+      return;
+    }
+    list.forEach((it, i) => {
+      const row = document.createElement("div");
+      row.className = "palrow" + (i === PAL.sel ? " sel" : "");
+      row.innerHTML =
+        `<span class="pk">${esc(it.kind)}</span>` +
+        `<span class="pl">${esc(it.label)}</span>` +
+        `<span class="ph">${esc(it.hint || "")}</span>`;
+      row.onclick = () => { closePalette(); it.run(); };
+      listEl.appendChild(row);
+    });
+  };
+  inp.oninput = () => { PAL.q = inp.value; PAL.sel = 0; renderList(); };
+  inp.onkeydown = (e) => {
+    const list = palMatches();
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      PAL.sel = Math.min(PAL.sel + 1, list.length - 1);
+      renderList();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      PAL.sel = Math.max(PAL.sel - 1, 0);
+      renderList();
+    } else if (e.key === "Enter") {
+      const it = list[PAL.sel];
+      if (it) { closePalette(); it.run(); }
+    } else if (e.key === "Escape") {
+      closePalette();
+    }
+  };
+  box.appendChild(inp);
+  box.appendChild(listEl);
+  p.onclick = (e) => { if (e.target === p) closePalette(); };
+  p.appendChild(box);
+  renderList();
+  inp.focus();
+}
+
 function renderGroups() {
   const el = document.getElementById("groups");
   const gs = (DATA.types[TAB] || {}).group_info || [];
@@ -3354,24 +4036,24 @@ function render() {
   renderLinks();
   renderGit();
   renderTabs();
+  const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
+    insight: "insightview", doctor: "doctorview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   if (isEditor) {
     document.getElementById("itemsview").hidden = true;
-    document.getElementById("settingsview").hidden = true;
+    for (const v of Object.values(views)) document.getElementById(v).hidden = true;
     renderEditor();
     return;
   }
-  const isSettings = TAB === "settings";
-  const isMcp = TAB === "mcp";
-  const isStl = TAB === "statusline";
-  document.getElementById("itemsview").hidden = isSettings || isMcp || isStl;
-  document.getElementById("settingsview").hidden = !isSettings;
-  document.getElementById("mcpview").hidden = !isMcp;
-  document.getElementById("stlview").hidden = !isStl;
-  if (isSettings) { renderSettings(); return; }
-  if (isMcp) { renderMcp(); return; }
-  if (isStl) { renderStatusline(); return; }
+  for (const [t, v] of Object.entries(views))
+    document.getElementById(v).hidden = TAB !== t;
+  document.getElementById("itemsview").hidden = TAB in views;
+  if (TAB === "settings") { renderSettings(); return; }
+  if (TAB === "mcp") { renderMcp(); return; }
+  if (TAB === "statusline") { renderStatusline(); return; }
+  if (TAB === "insight") { renderInsight(); return; }
+  if (TAB === "doctor") { renderDoctor(); return; }
   renderGroups();
   const q = document.getElementById("q").value.toLowerCase();
   const data = DATA.types[TAB] || { active: [], archived: [] };
@@ -3438,7 +4120,7 @@ const SCHEMA = __SCHEMA__;
 
 async function refresh() {
   DATA = await api("/api/state");
-  if (!["settings", "mcp", "statusline"].includes(TAB) && !DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
+  if (!EXTRA_TABS.includes(TAB) && !DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
   render();
 }
 
@@ -3629,24 +4311,31 @@ document.getElementById("sortsel").addEventListener("change", (e) => {
   render();
 });
 
-// Keyboard: "/" focuses the filter, Escape closes editor/menu, 1-9 switch tabs.
+// Keyboard: Ctrl/Cmd+K palette, "/" focuses the filter, Escape closes
+// editor/menu, 1-9 switch tabs.
 document.addEventListener("keydown", (e) => {
   if (!document.getElementById("modal").hidden) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    if (PAL) closePalette();
+    else openPalette();
+    return;
+  }
+  if (PAL) return;  // the palette input handles its own keys
   const tag = e.target.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
     if (e.key === "Escape") e.target.blur();
     return;
   }
   if (e.key === "/") {
-    if (EDITING || ["settings", "mcp", "statusline"].includes(TAB)) return;
+    if (EDITING || EXTRA_TABS.includes(TAB)) return;
     e.preventDefault();
     document.getElementById("q").focus();
   } else if (e.key === "Escape") {
     closeMenu();
     if (EDITING) closeEditor();
   } else if (e.key >= "1" && e.key <= "9" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    const tabs = [...Object.keys(DATA.types), "mcp", "statusline", "settings"];
-    const t = tabs[+e.key - 1];
+    const t = allTabs()[+e.key - 1];
     if (t) { TAB = t; location.hash = t; render(); }
   }
 });
@@ -3672,9 +4361,20 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def host_ok(self):
+        """Reject non-loopback Host headers (DNS-rebinding protection)."""
+        host = (self.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return True
+        self.send(403, {"error": "bad host"})
+        return False
+
     def do_GET(self):
+        if not self.host_ok():
+            return
         if self.path == "/":
-            self.send(200, PAGE.replace("__SCHEMA__", json.dumps(SETTINGS_SCHEMA)),
+            self.send(200, PAGE.replace("__SCHEMA__", json.dumps(SETTINGS_SCHEMA))
+                              .replace("__TOKEN__", TOKEN),
                       "text/html; charset=utf-8")
         elif self.path == "/favicon.ico":
             self.send(200, "<svg xmlns='http://www.w3.org/2000/svg' "
@@ -3730,6 +4430,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, item_read(type_, scope, get("name"), get("file") or None))
             except (ValueError, OSError) as e:
                 self.send(400, {"error": str(e)})
+        elif self.path.startswith("/api/insight"):
+            rescan = "rescan" in self.path
+            self.send(200, {"budget": insight_budget(),
+                            "usage": usage_stats(rescan=rescan)})
+        elif self.path == "/api/doctor":
+            self.send(200, doctor())
         else:
             self.send(404, {"error": "not found"})
 
@@ -4045,6 +4751,11 @@ class Handler(BaseHTTPRequestHandler):
                 "agents": ag_n, "config_files": cfg_files}
 
     def do_POST(self):
+        if not self.host_ok():
+            return
+        if self.headers.get("x-claude-ui") != TOKEN:
+            self.send(403, {"error": "bad or missing token — reload the page"})
+            return
         try:
             req = self.body()
             action = self.path.removeprefix("/api/")
@@ -4093,6 +4804,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if action == "mcp-test":
                 self.send(200, mcp_test(req.get("name", "")))
+                return
+            if action == "doctor-fix":
+                doctor_fix(req.get("action", ""), req.get("path", ""))
+                self.send(200, {"ok": True})
                 return
             if action == "statusline-save":
                 statusline_save(req.get("config"), bool(req.get("apply")))
