@@ -110,6 +110,121 @@ ordered by impact-vs-effort within each group.
     functions; a palette listing "new skill", "link settings.json", "apply
     all MCP", jump-to-item, would make the whole tool keyboard-first.
 
+## Round 2 — toward an incredible config manager
+
+Ambition level up: not just "manage the files" but own the whole config
+lifecycle — insight, authoring, distribution, and safety. Grouped by theme;
+★ marks the ideas that would most differentiate the tool.
+
+### Insight: know what your config costs and does
+
+29. ★ **Context-budget dashboard.** Every session starts by loading
+    CLAUDE.md + every skill description + agent/command frontmatter into
+    context. Estimate tokens per piece (chars/4 is fine) and render a
+    stacked bar: "your config costs ~6.2k tokens of every session — 3.1k
+    of it is skill descriptions, and these 5 skills are half of that."
+    Nothing else surfaces this today, and it changes how people write
+    descriptions. Per-row token chips; warn at a configurable budget.
+30. ★ **Usage analytics from transcripts.** `~/.claude/projects/**/*.jsonl`
+    records every session. Parse locally (stdlib, cached) to get per-skill /
+    per-command invocation counts and last-used dates → a "last used"
+    column, "never used in 90 days — archive?" hints, busiest projects,
+    sessions per day. Turns archiving from guesswork into hygiene.
+31. ★ **Permission advisor.** Scan transcripts for Bash/tool permission
+    prompts the user approved repeatedly; propose concrete
+    `permissions.allow` rules with one-click add to settings.json (the
+    /fewer-permission-prompts idea, productized with a review UI).
+32. **Doctor tab.** One button, full health sweep: broken/orphaned symlinks,
+    `*.bak` leftovers, archive orphans, group/collection name collisions,
+    hooks pointing at missing scripts, MCP commands not on PATH, settings
+    keys not in the schema, skills missing "Use when" triggers, statusline
+    script drift vs saved config. Each finding with a fix action. (Absorbs
+    the old #5/#16 into one place.)
+
+### Authoring: make writing config a first-class experience
+
+33. ★ **Claude-assisted authoring.** The manager sits next to a `claude`
+    CLI — shell out headless (`claude -p`, user's own auth) for: "draft a
+    skill from this one-line description", "review this skill's triggers
+    and tighten the description", "explain why this hook config is wrong".
+    Show the diff, apply on accept. The tool that manages Claude config
+    should be able to ask Claude.
+34. **Hooks builder with test-fire.** Structured rows (event → matcher →
+    command → timeout) over settings.hooks, a recipe library (format on
+    save, guard dangerous Bash, notify on Stop), and a "test" button that
+    pipes a sample event JSON into the command and shows stdout/exit code.
+35. **Frontmatter-as-form editor.** For skills/commands/agents: name,
+    description, allowed-tools (multiselect of real tool names), model
+    picker as form fields above the markdown body; body gets a rendered
+    markdown preview toggle (small hand-rolled renderer, keep stdlib-only).
+36. **Keybindings builder** with a key-capture input and conflict
+    detection against defaults + existing bindings.
+37. **Settings power-ups:** filter box; "differs from default" filter;
+    settings.local.json support; deprecated/unknown-key badges; per-key
+    link to the docs anchor; masked display for env values that look secret.
+
+### Distribution: config that travels
+
+38. ★ **New-machine bootstrap.** Generate a one-liner (`curl | sh` or
+    `npx`-style) + a committed `bootstrap.sh` that clones the repo, runs a
+    headless link-everything pass (same code as the links panel), applies
+    MCP servers, and prints what it did. The links panel becomes: "set up
+    this machine" on first run.
+39. **Machine manifest.** Commit a small `machines.json` (hostname →
+    linked sources, last-seen); the UI shows every machine's link/source
+    choices and staleness ("laptop is 12 commits behind"). Pull button.
+40. **Import from URL.** Paste a GitHub repo/gist URL of a skill or
+    collection → fetch, preview the file tree, import. Inverse: export any
+    item/group/collection as a zip.
+41. **Plugin & marketplace awareness.** Read `~/.claude/plugins` +
+    configured marketplaces: list installed plugins and their
+    skills/commands next to yours (read-only at first), flag name shadowing
+    between plugin skills and repo skills.
+42. **Project-level config registry.** Register project repos (or scan
+    common dirs) and manage their `.claude/` — settings, CLAUDE.md,
+    `.mcp.json` — from the same UI: compare project vs user config,
+    promote a project skill to user level, push a user command down into a
+    project. Today the tool stops at user scope; real setups live in both.
+
+### Safety and trust
+
+43. ★ **CSRF/rebinding hardening.** Any webpage can POST to
+    127.0.0.1:7333 today. Mint a per-run token, embed it in the page,
+    require it on every POST, and validate the Host header. Cheap, and it
+    makes "config manager with a commit button" defensible.
+44. **Trash + undo toast.** Deletes move to `archive/trash/<ts>/` with a
+    5s "undo" toast and a purge button (upgrade of old #22).
+45. **Config time machine.** Per-item history from git (`git log --follow`),
+    view any version, restore with one click; a global "what changed this
+    week" feed of the config repo.
+46. **Session-restart awareness.** Mark each mutation with whether a
+    running session picks it up live (statusline, skills) or needs a new
+    session (settings.json, CLAUDE.md) — one honest badge instead of
+    folklore.
+
+### UX: the daily-driver feel
+
+47. **Command palette (Ctrl+K):** fuzzy jump to any item, any action
+    ("link settings", "new agent", "apply all mcp"), any tab.
+48. **Global search** across all types and file contents (server-side
+    grep), with hit previews (absorbs old #8).
+49. **Bulk select:** checkboxes on rows → archive/move/delete many at once.
+50. **Drag-and-drop everywhere:** drop a folder on the page to import;
+    drag a row onto a folder chip to move it.
+51. **Live reload:** poll a cheap state hash (or SSE) so external edits —
+    including ones made by a running Claude session — appear without a
+    manual refresh; flash the changed row.
+52. **PWA manifest** so the UI installs as an app window with the ⚙️ icon.
+
+### Sequencing sketch
+
+Wave 1 (insight, mostly read-only, high wow): #29 token dashboard,
+#30 usage analytics, #32 doctor, #43 CSRF.
+Wave 2 (authoring): #34 hooks builder, #35 frontmatter forms, #37 settings
+power-ups, #47 palette, #48 search.
+Wave 3 (reach): #33 claude -p integration, #38 bootstrap, #42 project
+registry, #45 time machine.
+
 ## Code health (enables the above)
 
 26. **Split the file.** 3,400 lines with HTML/CSS/JS inside a Python string
