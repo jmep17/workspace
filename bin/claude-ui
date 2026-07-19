@@ -30,6 +30,7 @@ real target by moving it into the repo and symlinking back. Stdlib only.
 
 import argparse
 import base64
+import errno
 import json
 import os
 import re
@@ -3266,8 +3267,19 @@ def main():
     ap.add_argument("--no-open", action="store_true", help="don't open a browser")
     args = ap.parse_args()
     migrate_legacy_work()
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    url = f"http://127.0.0.1:{args.port}"
+    srv = None
+    for port in range(args.port, args.port + 20):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError as e:
+            if e.errno not in (errno.EADDRINUSE, errno.EACCES):
+                raise
+    if srv is None:
+        sys.exit(f"claude-ui: ports {args.port}-{args.port + 19} all in use")
+    if port != args.port:
+        print(f"claude-ui: port {args.port} in use, using {port}")
+    url = f"http://127.0.0.1:{port}"
     print(f"claude-ui: {url}  (repo: {REPO}, config dir: {config_dir()})")
     if not args.no_open:
         webbrowser.open(url)
