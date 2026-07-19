@@ -39,6 +39,9 @@ return {
         command = function(self, ctx)
           return require("conform.util").from_node_modules("prettier")(self, ctx)
         end,
+        -- CLI flags beat any project .prettierrc, so semicolons are always
+        -- added even in projects configured with `semi: false`
+        prepend_args = { "--semi" },
       },
     },
     format_on_save = function(bufnr)
