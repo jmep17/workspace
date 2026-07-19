@@ -115,7 +115,21 @@ ordered by impact-vs-effort within each group.
 Wave 1 landed (2026-07-19): #29 context-budget dashboard + #30 transcript
 usage analytics (insight tab), #32 doctor tab with fix actions, #43
 CSRF/rebinding hardening (per-run POST token + Host validation), and #47
-command palette (Ctrl/⌘-K). Remaining waves still open.
+command palette (Ctrl/⌘-K).
+
+Waves 2+3 landed (2026-07-19, second pass), plus a new **costs tab**: a cost-
+management dashboard priced from transcripts (per-day chart, by-model /
+by-project tables, cache-savings tile, pricing overrides via .claude-ui.json).
+Also shipped: #31 permission advisor with one-click allow rules, #33 claude -p
+assisted authoring in the editor, #34 hooks builder with test-fire, #37
+settings filter + only-set, #38 bootstrap.sh + --link-all CLI, #40 import from
+GitHub URL + export zip, #41 plugin shadow check (doctor), #44 trash + undo
+toast (purge via doctor), #45 per-item git history with restore, #46 restart-
+awareness notes, #49 bulk select, #51 live reload (fingerprint polling), #52
+PWA manifest, #16 markdown preview.
+Still open: #35 frontmatter-as-form, #36 keybindings builder, #39 machine
+manifest, #42 project registry, #48 content-grep search, #50 drag-and-drop
+import, #26 file split, #28 tests.
 
 Ambition level up: not just "manage the files" but own the whole config
 lifecycle — insight, authoring, distribution, and safety. Grouped by theme;

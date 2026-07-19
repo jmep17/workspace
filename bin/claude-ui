@@ -31,6 +31,7 @@ real target by moving it into the repo and symlinking back. Stdlib only.
 import argparse
 import base64
 import errno
+import io
 import json
 import os
 import re
@@ -43,6 +44,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1526,6 +1529,56 @@ def settings_set(key, value):
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+# ---------------------------------------------------------------- trash
+
+TRASH = ARCHIVE / "trash"
+
+
+def trash_put(src, type_, scope, name):
+    """Move a path into archive/trash/<token>/ so deletes are undoable."""
+    TRASH.mkdir(parents=True, exist_ok=True)
+    token = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+    tdir = TRASH / token
+    tdir.mkdir()
+    entry = src.name
+    orig = str(src)
+    src.rename(tdir / entry)
+    (tdir / "meta.json").write_text(json.dumps(
+        {"type": type_, "scope": scope, "name": name,
+         "orig": orig, "entry": entry}))
+    return token
+
+
+def undelete(token):
+    if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", token or ""):
+        raise ValueError("bad trash token")
+    tdir = TRASH / token
+    try:
+        meta = json.loads((tdir / "meta.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        raise ValueError("trash entry not found") from None
+    orig = Path(meta.get("orig") or "")
+    try:
+        ok = orig.resolve(strict=False).is_relative_to(REPO.resolve())
+    except OSError:
+        ok = False
+    if not ok:
+        raise ValueError("refusing to restore outside the repo")
+    if orig.exists() or orig.is_symlink():
+        raise ValueError(f"{orig.name}: exists again — restore by hand from {tdir}")
+    orig.parent.mkdir(parents=True, exist_ok=True)
+    (tdir / meta["entry"]).rename(orig)
+    shutil.rmtree(tdir, ignore_errors=True)
+    reconcile_links()
+    return meta
+
+
+def trash_entries():
+    if not TRASH.is_dir():
+        return []
+    return sorted(e.name for e in TRASH.iterdir() if e.is_dir())
+
+
 # ---------------------------------------------------------------- item editing
 
 MAX_EDIT = 2 * 1024 * 1024
@@ -1646,6 +1699,280 @@ def git_diff(path):
     return out or "(no textual diff)"
 
 
+def _repo_rel(rel):
+    """Validate a repo-relative path (for git history endpoints)."""
+    parts = Path(rel or "").parts
+    if not parts or any(p in ("..", "") or p.startswith("/") for p in parts):
+        raise ValueError("bad path")
+    p = REPO / rel
+    try:
+        if not p.resolve(strict=False).is_relative_to(REPO.resolve()):
+            raise ValueError("bad path")
+    except OSError:
+        raise ValueError("bad path") from None
+    return str(Path(rel))
+
+
+def file_history(rel):
+    rel = _repo_rel(rel)
+    out, err = _git_repo("log", "--follow", "--format=%H%x09%ad%x09%s",
+                         "--date=short", "-n", "40", "--", rel)
+    if err:
+        raise ValueError(err)
+    commits = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            commits.append({"rev": parts[0], "date": parts[1], "subject": parts[2]})
+    return commits
+
+
+def file_at_rev(rev, rel):
+    if not re.fullmatch(r"[0-9a-f]{7,40}", rev or ""):
+        raise ValueError("bad revision")
+    rel = _repo_rel(rel)
+    out, err = _git_repo("show", f"{rev}:{rel.replace(os.sep, '/')}")
+    if err:
+        raise ValueError(err)
+    return out
+
+
+# ---------------------------------------------------------------- import from URL
+
+GH_URL_RE = re.compile(
+    r"https?://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/tree/([\w./-]+))?/?$")
+
+
+def _fetch_github_zip(url):
+    m = GH_URL_RE.match((url or "").strip())
+    if not m:
+        raise ValueError("expected a github.com/owner/repo[/tree/branch[/subdir]] URL")
+    owner, repo, tail = m.groups()
+    ref, sub = "HEAD", ""
+    if tail:
+        parts = tail.split("/")
+        ref, sub = parts[0], "/".join(parts[1:])
+    zurl = f"https://codeload.github.com/{owner}/{repo}/zip/{ref}"
+    req = urllib.request.Request(zurl, headers={"User-Agent": "claude-ui"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read(30 * 1024 * 1024 + 1)
+    except (urllib.error.URLError, OSError) as e:
+        raise ValueError(f"download failed: {getattr(e, 'reason', e)}") from None
+    if len(data) > 30 * 1024 * 1024:
+        raise ValueError("download too large (>30 MB)")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ValueError("not a zip — does that branch exist?") from None
+    staged = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        parts = Path(info.filename).parts[1:]  # strip <repo>-<ref>/ root
+        if not parts:
+            continue
+        rel = Path(*parts)
+        if sub:
+            try:
+                rel = rel.relative_to(sub)
+            except ValueError:
+                continue
+        if any(x.startswith(".") or x == "node_modules" for x in rel.parts):
+            continue
+        blob = zf.read(info)
+        if len(blob) > 5 * 1024 * 1024:
+            continue
+        staged.append((rel, blob))
+        if len(staged) > 2000:
+            raise ValueError("too many files at that URL — point at a subdir")
+    if not staged:
+        raise ValueError("nothing importable found at that URL")
+    return staged
+
+
+def import_from_url(url, name, type_):
+    if type_ not in TYPES:
+        raise ValueError("unknown type")
+    if not name:
+        raise ValueError("name required")
+    staged = _fetch_github_zip(url)
+    coll = normalize_collection_upload(staged)
+    if coll is not None:
+        if not NAME_RE.match(name) or name in NON_COLLECTIONS:
+            raise ValueError("bad collection name")
+        dest = REPO / name
+        if dest.exists() or dest.is_symlink():
+            raise ValueError(f"{name}: already exists at the repo root")
+        write_staged(coll, dest)
+        reconcile_links()
+        return {"kind": "collection", "path": name, "files": len(coll)}
+    if TYPES[type_]["kind"] == "dir":
+        link = resolve_skill("active", name)
+        path = skill_creation_path(name)
+        if link.exists() or link.is_symlink() or path.exists():
+            raise ValueError(f"{name}: already exists")
+        staged = normalize_skill_upload(staged)
+        kind, nskills = classify_skill_upload(staged)
+        write_staged(staged, path)
+        reconcile_links()
+        return {"kind": kind, "path": str(path.relative_to(REPO)),
+                "files": len(staged), "skills": nskills}
+    ensure_md_collection(type_, name)
+    base = TYPES[type_]["root"] / md_rel(name)
+    if not any(p.suffix == ".md" for p, _ in staged):
+        raise ValueError(f"no .md files found — {type_} are markdown files")
+    for rel, _ in staged:
+        if (base / rel).exists():
+            raise ValueError(f"{rel}: already exists")
+    base.mkdir(parents=True, exist_ok=True)
+    write_staged(staged, base)
+    return {"kind": type_, "path": str(base.relative_to(REPO)), "files": len(staged)}
+
+
+# ---------------------------------------------------------------- bootstrap
+
+BOOTSTRAP_SH = """#!/bin/sh
+# Generated by claude-ui. Sets up this machine's Claude Code config from the
+# repo: symlinks skills/commands/agents/config files into the config dir
+# (backing up anything real) and applies the repo's MCP servers.
+#
+# Usage: ./bootstrap.sh          (after cloning the repo on a new machine)
+set -e
+REPO="$(cd "$(dirname "$0")" && pwd)"
+command -v python3 >/dev/null 2>&1 || { echo "bootstrap: python3 required" >&2; exit 1; }
+exec python3 "$REPO/bin/claude-ui" --link-all
+"""
+
+
+def write_bootstrap():
+    p = REPO / "bootstrap.sh"
+    p.write_text(BOOTSTRAP_SH)
+    p.chmod(0o755)
+    return str(p.relative_to(REPO))
+
+
+def link_all():
+    """Headless link-everything pass (bootstrap / new machine setup)."""
+    for mid in MAPPINGS:
+        try:
+            r = do_link(mid)
+            extra = (" (adopted existing content into the repo — commit it)"
+                     if r["adopted"] else
+                     f" (previous content saved at {r['backup']})" if r["backup"] else "")
+            print(f"  linked  {mid}{extra}")
+        except (ValueError, OSError) as e:
+            print(f"  skipped {mid}: {e}")
+    applied = 0
+    try:
+        for row in mcp_state()["servers"]:
+            if row["source"] and row["status"] in ("repo-only", "differs"):
+                mcp_machine_set(row["name"], row["config"])
+                applied += 1
+        print(f"  mcp     {applied} server(s) applied to ~/.claude.json")
+    except (ValueError, OSError) as e:
+        print(f"  mcp     skipped: {e}")
+    print(f"claude-ui: {config_dir()} now points at {REPO}")
+
+
+# ---------------------------------------------------------------- export / reload
+
+def export_zip(type_=None, scope="active", name=None, collection=None):
+    if collection:
+        if collection not in collections():
+            raise ValueError(f"{collection}: no such collection")
+        root, base = REPO / collection, collection
+    else:
+        if type_ not in TYPES:
+            raise ValueError("unknown type")
+        if scope not in ("active", "archived"):
+            raise ValueError("bad scope")
+        root = item_root(type_, scope, name)
+        base = Path(name or "item").name
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        if root.is_file():
+            z.write(root, root.name)
+        elif root.is_dir():
+            for p in sorted(root.rglob("*")):
+                rel = p.relative_to(root)
+                if p.is_file() and not any(x.startswith(".") for x in rel.parts):
+                    z.write(p, str(Path(base) / rel))
+        else:
+            raise ValueError(f"{name or collection}: not found")
+    return buf.getvalue(), base + ".zip"
+
+
+def fingerprint():
+    """Cheap hash over managed-tree mtimes so the UI can live-reload."""
+    crc = 0
+    n = 0
+    roots = ([spec["root"] for spec in TYPES.values()]
+             + [REPO / c for c in collections()]
+             + [REPO / "claude", ARCHIVE, REPO / ".git" / "HEAD",
+                config_dir() / "settings.json"])
+    for root in roots:
+        for p in ([root] if not root.is_dir()
+                  else sorted(root.rglob("*"))[:4000]):
+            n += 1
+            if n > 20000:
+                break
+            try:
+                st = p.stat() if not p.is_symlink() else p.lstat()
+            except OSError:
+                continue
+            crc = zlib.crc32(f"{p}:{st.st_mtime_ns}:{st.st_size};".encode(), crc)
+    return format(crc, "08x")
+
+
+# ---------------------------------------------------------------- claude assist
+
+ASSIST_PRESETS = {
+    "improve": (
+        "Improve this Claude Code config file. Tighten the description so its "
+        "triggers are unambiguous (a skill description should say what it does, "
+        "then 'Use when ...' trigger conditions), fix frontmatter issues, and "
+        "improve clarity without changing the intent.", True),
+    "review": (
+        "Review this Claude Code config file. List concrete problems only: "
+        "vague or missing 'Use when' triggers, contradictions, verbosity that "
+        "wastes context, frontmatter mistakes. Be specific and brief.", False),
+}
+
+
+def assist(mode, custom, content, path):
+    exe = shutil.which("claude")
+    if not exe:
+        raise ValueError("claude CLI not found on PATH — assist needs Claude Code installed")
+    if not isinstance(content, str) or not content.strip() or len(content) > 200_000:
+        raise ValueError("nothing to work on (or file too large)")
+    if mode == "custom":
+        if not (custom or "").strip():
+            raise ValueError("custom instruction required")
+        instruction, wants_file = custom.strip(), True
+    elif mode in ASSIST_PRESETS:
+        instruction, wants_file = ASSIST_PRESETS[mode]
+    else:
+        raise ValueError("unknown assist mode")
+    prompt = (f"{instruction}\n\nThe file is {path}:\n"
+              f"<file>\n{content}\n</file>\n")
+    if wants_file:
+        prompt += ("\nReturn ONLY the complete revised file content. "
+                   "No preamble, no explanation, no code fences.")
+    try:
+        r = subprocess.run([exe, "-p", prompt], capture_output=True, text=True,
+                           timeout=240, cwd=str(REPO))
+    except subprocess.TimeoutExpired:
+        raise ValueError("claude -p timed out after 240s") from None
+    if r.returncode != 0:
+        raise ValueError("claude -p failed: " + (r.stderr.strip() or f"exit {r.returncode}")[:500])
+    text = r.stdout.strip()
+    if wants_file and text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = re.sub(r"\n```$", "", text)
+    return {"result": text, "replaces": wants_file}
+
+
 def git_commit(message):
     if not isinstance(message, str) or not message.strip():
         raise ValueError("commit message required")
@@ -1721,14 +2048,41 @@ def insight_budget():
 
 
 USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
+CACHE_V = 2
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CMD_RE = re.compile(r"<command-name>/?([A-Za-z0-9:_.\/-]+)</command-name>")
 MAX_TRANSCRIPT = 64 * 1024 * 1024
 
+# commands whose first sub-word is part of the identity (git status vs git push)
+BASH_MULTI = {"git", "npm", "npx", "yarn", "pnpm", "cargo", "docker", "kubectl",
+              "python", "python3", "pip", "pip3", "uv", "make", "go", "bundle",
+              "gh", "node", "poetry", "brew", "apt", "apt-get", "gcloud", "aws"}
+
+
+def _bash_prefix(cmd):
+    """'git diff --stat | head' -> 'git diff'; None if unclassifiable."""
+    seg = re.split(r"[|;&\n]", (cmd or "").strip(), 1)[0].strip()
+    toks = seg.split()
+    while toks and (toks[0] in ("env", "sudo", "command")
+                    or ("=" in toks[0] and not toks[0].startswith(("/", ".")))):
+        toks.pop(0)
+    if not toks:
+        return None
+    head = toks[0].rsplit("/", 1)[-1]
+    if not re.match(r"^[A-Za-z0-9._-]+$", head):
+        return None
+    if head in BASH_MULTI and len(toks) > 1 and re.match(r"^[A-Za-z0-9._-]+$", toks[1]):
+        return head + " " + toks[1]
+    return head
+
 
 def _scan_transcript(path):
-    """One transcript -> {'kind\\tname': [count, last_iso_ts]}."""
-    counts = {}
+    """One transcript -> {counts, days, models, bash, cwd}."""
+    counts = {}   # "kind\tname" -> [count, last_iso_ts]
+    days = {}     # "YYYY-MM-DD" -> {model: [in, out, cacheW, cacheR, msgs]}
+    models = {}   # model -> [in, out, cacheW, cacheR, msgs]  (for per-project cost)
+    bash = {}     # prefix -> count
+    cwd = ""
 
     def bump(kind, name, ts):
         k = kind + "\t" + name
@@ -1749,15 +2103,30 @@ def _scan_transcript(path):
     try:
         with open(path, errors="replace") as f:
             for line in f:
-                if ("command-name" not in line and '"Skill"' not in line
-                        and '"Task"' not in line):
+                if ('"usage"' not in line and "command-name" not in line
+                        and '"Skill"' not in line and '"Task"' not in line
+                        and '"Bash"' not in line and '"cwd"' not in line):
                     continue
                 try:
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
                 ts = d.get("timestamp") or ""
-                content = (d.get("message") or {}).get("content")
+                if not cwd and isinstance(d.get("cwd"), str):
+                    cwd = d["cwd"]
+                msg = d.get("message") or {}
+                usage = msg.get("usage")
+                if isinstance(usage, dict) and msg.get("model"):
+                    day = ts[:10] or "unknown"
+                    row = [int(usage.get("input_tokens") or 0),
+                           int(usage.get("output_tokens") or 0),
+                           int(usage.get("cache_creation_input_tokens") or 0),
+                           int(usage.get("cache_read_input_tokens") or 0), 1]
+                    for agg in (days.setdefault(day, {}), models):
+                        slot = agg.setdefault(msg["model"], [0, 0, 0, 0, 0])
+                        for i, v in enumerate(row):
+                            slot[i] += v
+                content = msg.get("content")
                 for text in texts(content):
                     for m in CMD_RE.finditer(text):
                         bump("command", m.group(1).replace(":", "/"), ts)
@@ -1769,20 +2138,27 @@ def _scan_transcript(path):
                         bump("skill", str(inp["skill"]), ts)
                     elif b.get("name") == "Task" and inp.get("subagent_type"):
                         bump("agent", str(inp["subagent_type"]), ts)
+                    elif b.get("name") == "Bash" and inp.get("command"):
+                        p = _bash_prefix(str(inp["command"]))
+                        if p:
+                            bash[p] = bash.get(p, 0) + 1
     except OSError:
-        return {}
-    return counts
+        return {"counts": {}, "days": {}, "models": {}, "bash": {}, "cwd": ""}
+    return {"counts": counts, "days": days, "models": models,
+            "bash": bash, "cwd": cwd}
 
 
-def usage_stats(rescan=False):
-    """Aggregate usage across all transcripts, incrementally cached by
-    (mtime, size) per file so only new/changed sessions are re-read."""
+def transcript_stats(rescan=False):
+    """Aggregate usage/cost/bash data across all transcripts, incrementally
+    cached by (mtime, size) per file so only new sessions are re-read."""
     cache = {}
     if not rescan and USAGE_CACHE.is_file():
         try:
             cache = json.loads(USAGE_CACHE.read_text())
         except (json.JSONDecodeError, OSError):
             cache = {}
+    if cache.get("v") != CACHE_V:
+        cache = {}
     files = cache.get("files") or {}
     seen = set()
     scanned = 0
@@ -1798,7 +2174,7 @@ def usage_stats(rescan=False):
             seen.add(key)
             sig = [int(st.st_mtime), st.st_size]
             if files.get(key, {}).get("sig") != sig:
-                files[key] = {"sig": sig, "counts": _scan_transcript(p)}
+                files[key] = {"sig": sig, "data": _scan_transcript(p)}
                 scanned += 1
     for key in list(files):
         if key not in seen:
@@ -1806,20 +2182,174 @@ def usage_stats(rescan=False):
     if scanned or set(files) != seen:
         try:
             USAGE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            USAGE_CACHE.write_text(json.dumps({"files": files}))
+            USAGE_CACHE.write_text(json.dumps({"v": CACHE_V, "files": files}))
         except OSError:
             pass
-    total = {}
+    by = {}
+    days = {}
+    bash = {}
+    projects = {}
     for f in files.values():
-        for k, (n, ts) in (f.get("counts") or {}).items():
+        data = f.get("data") or {}
+        for k, (n, ts) in (data.get("counts") or {}).items():
             kind, _, name = k.partition("\t")
-            slot = total.setdefault(kind, {}).setdefault(
-                name, {"count": 0, "last": ""})
+            slot = by.setdefault(kind, {}).setdefault(name, {"count": 0, "last": ""})
             slot["count"] += n
             slot["last"] = max(slot["last"], ts)
-    return {"sessions": len(files), "scanned_now": scanned, "by": total,
+        for day, mrows in (data.get("days") or {}).items():
+            dslot = days.setdefault(day, {})
+            for model, row in mrows.items():
+                s = dslot.setdefault(model, [0, 0, 0, 0, 0])
+                for i, v in enumerate(row):
+                    s[i] += v
+        for prefix, n in (data.get("bash") or {}).items():
+            bash[prefix] = bash.get(prefix, 0) + n
+        cwd = data.get("cwd") or "(unknown)"
+        pslot = projects.setdefault(cwd, {})
+        for model, row in (data.get("models") or {}).items():
+            s = pslot.setdefault(model, [0, 0, 0, 0, 0])
+            for i, v in enumerate(row):
+                s[i] += v
+    return {"sessions": len(files), "scanned_now": scanned, "by": by,
+            "days": days, "bash": bash, "projects": projects,
             "dir": str(PROJECTS_DIR).replace(str(Path.home()), "~", 1),
             "available": PROJECTS_DIR.is_dir()}
+
+
+def usage_stats(rescan=False):
+    return transcript_stats(rescan)
+
+
+# ---------------------------------------------------------------- costs
+# API list prices per MTok (cache write 1.25x input, cache read 0.1x input).
+# Matched by substring, first hit wins; override via "pricing" in
+# .claude-ui.json: {"<substring>": [in_per_mtok, out_per_mtok]}.
+
+PRICING = [
+    ("fable", 10, 50), ("mythos", 10, 50),
+    ("opus-4-1", 15, 75), ("opus-4-0", 15, 75), ("3-opus", 15, 75),
+    ("opus", 5, 25),
+    ("3-5-haiku", 0.8, 4), ("3-haiku", 0.25, 1.25),
+    ("haiku", 1, 5),
+    ("sonnet", 3, 15),
+]
+
+
+def model_price(model):
+    m = (model or "").lower()
+    overrides = read_cfg().get("pricing")
+    if isinstance(overrides, dict):
+        for sub, v in overrides.items():
+            if (isinstance(v, list) and len(v) == 2 and sub.lower() in m):
+                return float(v[0]), float(v[1]), True
+    for sub, pin, pout in PRICING:
+        if sub in m:
+            return pin, pout, True
+    return 5, 25, False  # unknown model: opus-tier guess, flagged in the UI
+
+
+def _row_cost(row, pin, pout):
+    i, o, cw, cr = row[0], row[1], row[2], row[3]
+    return (i * pin + o * pout + cw * pin * 1.25 + cr * pin * 0.1) / 1e6
+
+
+def cost_stats(rescan=False):
+    st = transcript_stats(rescan)
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    d7 = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
+    d30 = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 30 * 86400))
+    month = today[:8] + "01"
+    per_day = []
+    by_model = {}
+    totals = {"today": 0, "last7": 0, "last30": 0, "month": 0, "all": 0}
+    cache_savings = 0.0
+    unknown = set()
+    for day in sorted(st["days"]):
+        drow = {"day": day, "cost": 0, "by": {}}
+        for model, row in st["days"][day].items():
+            pin, pout, known = model_price(model)
+            if not known:
+                unknown.add(model)
+            c = _row_cost(row, pin, pout)
+            drow["cost"] += c
+            drow["by"][model] = round(c, 4)
+            m = by_model.setdefault(model, {"cost": 0, "in": 0, "out": 0,
+                                            "cacheR": 0, "cacheW": 0, "msgs": 0})
+            m["cost"] += c
+            m["in"] += row[0]
+            m["out"] += row[1]
+            m["cacheW"] += row[2]
+            m["cacheR"] += row[3]
+            m["msgs"] += row[4]
+            cache_savings += row[3] * pin * 0.9 / 1e6
+            totals["all"] += c
+            if day == today:
+                totals["today"] += c
+            if day >= d7:
+                totals["last7"] += c
+            if day >= d30:
+                totals["last30"] += c
+            if day >= month:
+                totals["month"] += c
+        drow["cost"] = round(drow["cost"], 4)
+        per_day.append(drow)
+    by_project = []
+    for cwd, mrows in st["projects"].items():
+        c = sum(_row_cost(row, *model_price(m)[:2]) for m, row in mrows.items())
+        msgs = sum(row[4] for row in mrows.values())
+        if msgs:
+            by_project.append({"cwd": cwd, "cost": round(c, 4), "msgs": msgs})
+    by_project.sort(key=lambda p: -p["cost"])
+    return {"days": per_day[-30:], "totals": {k: round(v, 2) for k, v in totals.items()},
+            "by_model": [{"model": m, **{k: (round(v, 2) if k == "cost" else v)
+                                         for k, v in d.items()}}
+                         for m, d in sorted(by_model.items(),
+                                            key=lambda kv: -kv[1]["cost"])],
+            "by_project": by_project[:12],
+            "cache_savings": round(cache_savings, 2),
+            "unknown_models": sorted(unknown),
+            "sessions": st["sessions"], "dir": st["dir"],
+            "available": st["available"]}
+
+
+# ---------------------------------------------------------------- hooks
+
+HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+               "Notification", "Stop", "SubagentStop", "PreCompact", "SessionEnd"]
+
+
+def hook_sample(event):
+    """Representative stdin payload for test-firing a hook command."""
+    base = {"session_id": "claude-ui-test", "transcript_path": "/tmp/transcript.jsonl",
+            "cwd": str(REPO), "hook_event_name": event}
+    if event in ("PreToolUse", "PostToolUse"):
+        base.update(tool_name="Bash", tool_input={"command": "echo hello"})
+        if event == "PostToolUse":
+            base["tool_response"] = {"stdout": "hello\n", "stderr": ""}
+    elif event == "UserPromptSubmit":
+        base["prompt"] = "test prompt from claude-ui"
+    elif event == "Notification":
+        base["message"] = "test notification"
+    elif event == "SessionStart":
+        base["source"] = "startup"
+    return base
+
+
+def hook_test(command, event):
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("command required")
+    if event not in HOOK_EVENTS:
+        event = "PreToolUse"
+    try:
+        r = subprocess.run(command, shell=True, cwd=str(REPO),
+                           input=json.dumps(hook_sample(event)),
+                           capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "exit": None, "stdout": "", "stderr": "",
+                "detail": "timed out after 10s"}
+    return {"ok": r.returncode == 0, "exit": r.returncode,
+            "stdout": r.stdout[-2000:], "stderr": r.stderr[-2000:],
+            "detail": f"exit {r.returncode}"}
 
 
 # ---------------------------------------------------------------- doctor
@@ -1861,6 +2391,12 @@ def doctor():
                     f"{str(p).replace(home, '~', 1)} — broken symlink "
                     f"(points at {p.readlink()})",
                     {"action": "rm-broken-link", "path": str(p)})
+
+    tr = trash_entries()
+    if tr:
+        add("info", "trash",
+            f"{len(tr)} deleted item(s) in archive/trash — restorable until purged",
+            {"action": "purge-trash", "path": ""})
 
     # link rows needing attention
     for row in link_state():
@@ -1944,6 +2480,21 @@ def doctor():
                 add("info", t, f"{it['name']}: description has no \"Use when …\" "
                                "trigger — Claude may not know when to load it")
 
+    # plugin skills sharing a name with repo skills (one shadows the other)
+    plugins_dir = Path.home() / ".claude" / "plugins"
+    if plugins_dir.is_dir():
+        ours = {i["name"] for i in scan_skills(SKILLS, "active")}
+        try:
+            for smd in list(plugins_dir.glob("*/*/skills/*/SKILL.md"))[:500] + \
+                       list(plugins_dir.glob("*/*/*/skills/*/SKILL.md"))[:500]:
+                pname = smd.parent.name
+                if pname in ours:
+                    add("info", "plugins",
+                        f"installed plugin skill '{pname}' shares a name with "
+                        f"your skill ({smd.parent}) — one may shadow the other")
+        except OSError:
+            pass
+
     # archive entries that collide with active names (restore would fail)
     for t, spec in TYPES.items():
         archived = (scan_skills(SK_ARCHIVE, "archived") if spec["kind"] == "dir"
@@ -1964,6 +2515,9 @@ def doctor():
 
 
 def doctor_fix(action, path):
+    if action == "purge-trash":
+        shutil.rmtree(TRASH, ignore_errors=True)
+        return
     p = Path(path)
     cfg = config_dir().resolve()
     try:
@@ -2030,6 +2584,8 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>claude config</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <style>
   :root {
     --bg: #282828; --bg1: #3c3836; --bg2: #504945; --fg: #ebdbb2;
@@ -2276,6 +2832,26 @@ PAGE = """<!doctype html>
     margin-top: .9rem; flex-wrap: wrap; }
   .ftabs { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .6rem; }
   .ftabs button.on { color: var(--yellow); border-color: var(--yellow); }
+  .mdprev { border: 1px solid var(--bg2); border-radius: 6px; padding: 1rem 1.2rem;
+    font-size: .85rem; line-height: 1.6; overflow-wrap: anywhere; }
+  .mdprev h1, .mdprev h2, .mdprev h3, .mdprev h4 { color: var(--yellow);
+    margin: 1rem 0 .4rem; font-size: 1.05rem; text-transform: none;
+    letter-spacing: 0; }
+  .mdprev h1 { font-size: 1.2rem; }
+  .mdprev code { background: var(--bg1); padding: 0 .25rem; border-radius: 4px;
+    font-size: .82rem; }
+  .mdprev pre { background: var(--term); border: 1px solid var(--bg2);
+    border-radius: 6px; padding: .6rem .8rem; overflow-x: auto; font-size: .78rem; }
+  .mdprev pre code { background: none; padding: 0; }
+  .mdprev ul, .mdprev ol { padding-left: 1.4rem; margin: .4rem 0; }
+  .mdprev blockquote { border-left: 3px solid var(--bg2); margin: .4rem 0;
+    padding-left: .8rem; color: var(--fg2); }
+  .mdprev a { color: var(--blue); }
+  .mdprev hr { border: 0; border-top: 1px solid var(--bg2); margin: .8rem 0; }
+  .assistout { background: var(--term); border: 1px solid var(--bg2);
+    border-radius: 6px; padding: .7rem .9rem; font-size: .78rem;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem;
+    overflow-y: auto; margin-top: .6rem; }
   .tiles { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; }
   .tile { border: 1px solid var(--bg2); border-radius: 8px; padding: .55rem .8rem;
     flex: 1 1 9rem; min-width: 8rem; }
@@ -2302,6 +2878,14 @@ PAGE = """<!doctype html>
   .drow { display: flex; gap: .6rem; padding: .45rem .5rem; align-items: baseline;
     border-bottom: 1px solid var(--bg1); font-size: .82rem; flex-wrap: wrap; }
   .drow .dmsg { flex: 1; min-width: 12rem; overflow-wrap: anywhere; }
+  .chart { display: flex; align-items: flex-end; gap: 2px; height: 9rem;
+    border: 1px solid var(--bg2); border-radius: 8px; padding: .6rem .6rem .3rem;
+    margin-bottom: .3rem; }
+  .chart .cbar { flex: 1; min-width: 3px; background: var(--aqua);
+    border-radius: 2px 2px 0 0; position: relative; }
+  .chart .cbar:hover { background: var(--yellow); }
+  .chartkey { display: flex; justify-content: space-between; color: var(--fg2);
+    font-size: .68rem; margin-bottom: 1.2rem; }
   #palette { position: fixed; inset: 0; background: var(--shadow); z-index: 25;
     display: flex; justify-content: center; align-items: flex-start;
     padding: 10vh 1rem 1rem; }
@@ -2406,6 +2990,7 @@ PAGE = """<!doctype html>
   <div id="stlview" hidden></div>
   <div id="settingsview" hidden></div>
   <div id="insightview" hidden></div>
+  <div id="costsview" hidden></div>
   <div id="doctorview" hidden></div>
   <div id="itemsview">
   <div class="bar">
@@ -2417,10 +3002,12 @@ PAGE = """<!doctype html>
     <button onclick="newGroup()">+ folder</button>
     <button onclick="document.getElementById('up').click()">⇪ folder</button>
     <button onclick="document.getElementById('upf').click()">⇪ files</button>
+    <button onclick="importUrl()" title="import a skill, group, or collection from a GitHub URL">⇓ url</button>
     <button class="primary" onclick="newItem()">+ new</button>
     <input type="file" id="up" webkitdirectory multiple hidden>
     <input type="file" id="upf" multiple hidden>
   </div>
+  <div id="bulkbar" class="bar" hidden></div>
   <div id="groups" class="groups" hidden></div>
   <h2>Active <span class="count" id="n-active"></span></h2>
   <div id="active"></div>
@@ -2465,13 +3052,21 @@ function toggleTheme() {
 }
 
 // Toasts stack; errors stick around until dismissed (they may contain paths).
-function toast(msg, err) {
+// An optional action ({label, fn}) renders as a button — used for undo.
+function toast(msg, err, action) {
   const box = document.getElementById("toasts");
   const el = document.createElement("div");
   el.className = "toastmsg" + (err ? " err" : "");
   const span = document.createElement("span");
   span.textContent = msg;
   el.appendChild(span);
+  if (action) {
+    const ab = document.createElement("button");
+    ab.className = "small";
+    ab.textContent = action.label;
+    ab.onclick = () => { el.remove(); action.fn(); };
+    el.appendChild(ab);
+  }
   const x = document.createElement("span");
   x.className = "x";
   x.textContent = "×";
@@ -2479,7 +3074,7 @@ function toast(msg, err) {
   el.appendChild(x);
   box.appendChild(el);
   while (box.children.length > 5) box.firstChild.remove();
-  if (!err) setTimeout(() => el.remove(), 3500);
+  if (!err) setTimeout(() => el.remove(), action ? 10000 : 3500);
 }
 
 // Generic modal replacing prompt()/confirm(): resolves to {field: value} on OK,
@@ -2648,6 +3243,7 @@ function renderLinks() {
       `<span>links are managed in <b>${esc(DATA.config_dir)}</b>` +
       (DATA.default_dir ? " (the default — Claude Code reads this automatically)" : "") +
       `</span><span style="flex:1"></span>` +
+      `<button class="small" onclick="genBootstrap()" title="write a committable bootstrap.sh that links everything on a new machine">bootstrap.sh</button>` +
       `<button class="small" onclick="CFGEDIT=true;render()">change…</button>` +
       (DATA.default_dir ? "" : `<button class="small" onclick="resetCfgDir()">reset to default</button>`);
   }
@@ -2781,7 +3377,7 @@ async function resetCfgDir() {
   catch (e) { toast(e.message, true); }
 }
 
-const EXTRA_TABS = ["mcp", "statusline", "settings", "insight", "doctor"];
+const EXTRA_TABS = ["mcp", "statusline", "settings", "insight", "costs", "doctor"];
 const allTabs = () => [...Object.keys(DATA.types), ...EXTRA_TABS];
 
 function renderTabs() {
@@ -2797,11 +3393,13 @@ function renderTabs() {
       ? "statusline" + ((DATA.statusline || {}).applied ? " ✓" : "")
       : t === "insight"
       ? "insight"
+      : t === "costs"
+      ? "costs"
       : t === "doctor"
       ? "doctor" + (DOCTOR && DOCTOR.warns ? " · " + DOCTOR.warns + "⚠" : "")
       : t + " · " + DATA.types[t].active.length;
     b.className = t === TAB ? "on" : "";
-    b.onclick = () => { TAB = t; location.hash = t; render(); };
+    b.onclick = () => { TAB = t; BULK.clear(); location.hash = t; render(); };
     el.appendChild(b);
   }
 }
@@ -2855,12 +3453,93 @@ function settingRow(s) {
   return row;
 }
 
+const HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse",
+  "PostToolUse", "Notification", "Stop", "SubagentStop", "PreCompact",
+  "SessionEnd"];
+
+function hooksList(data) {
+  const hooks = data.hooks;
+  if (hooks == null) return [];
+  if (typeof hooks !== "object" || Array.isArray(hooks)) return null;
+  const out = [];
+  for (const [event, matchers] of Object.entries(hooks)) {
+    if (!Array.isArray(matchers)) return null;
+    matchers.forEach((m, mi) => {
+      if (!m || typeof m !== "object") return;
+      (Array.isArray(m.hooks) ? m.hooks : []).forEach((h, hi) => {
+        out.push({ event, mi, hi, matcher: m.matcher || "",
+          command: (h && h.command) || "", timeout: h && h.timeout });
+      });
+    });
+  }
+  return out;
+}
+
+async function hooksSave(newHooks) {
+  await api("/api/settings-set", { key: "hooks",
+    value: Object.keys(newHooks).length ? newHooks : null });
+  await refresh();
+}
+
+async function hookAdd() {
+  const r = await modal({ title: "add hook",
+    text: "the command receives the event JSON on stdin; exit code 2 blocks the action (tool events)",
+    fields: [
+      { id: "e", label: "event", type: "select", options: HOOK_EVENTS },
+      { id: "m", label: "matcher — tool name pattern, tool events only (blank = all)",
+        placeholder: "e.g. Bash or Edit|Write" },
+      { id: "c", label: "command" },
+      { id: "t", label: "timeout seconds (optional)" }], ok: "add" });
+  if (!r || !r.c) return;
+  const hooks = JSON.parse(JSON.stringify(((DATA.settings || {}).data || {}).hooks || {}));
+  const arr = (hooks[r.e] = hooks[r.e] || []);
+  let entry = arr.find((m) => (m.matcher || "") === (r.m || ""));
+  if (!entry) {
+    entry = r.m ? { matcher: r.m, hooks: [] } : { hooks: [] };
+    arr.push(entry);
+  }
+  const h = { type: "command", command: r.c };
+  if (r.t && !isNaN(+r.t)) h.timeout = +r.t;
+  (entry.hooks = entry.hooks || []).push(h);
+  try {
+    await hooksSave(hooks);
+    toast("hook added — applies to new sessions");
+  } catch (e) { toast(e.message, true); }
+}
+
+async function hookDelete(row) {
+  if (!(await mconfirm("delete hook", row.event + ": " + row.command, "delete"))) return;
+  const hooks = JSON.parse(JSON.stringify(DATA.settings.data.hooks));
+  const m = hooks[row.event][row.mi];
+  m.hooks.splice(row.hi, 1);
+  if (!m.hooks.length) hooks[row.event].splice(row.mi, 1);
+  if (!hooks[row.event].length) delete hooks[row.event];
+  try {
+    await hooksSave(hooks);
+    toast("hook removed");
+  } catch (e) { toast(e.message, true); }
+}
+
+async function hookFire(row) {
+  toast("piping a sample " + row.event + " event into the command…");
+  try {
+    const r = await api("/api/hook-test", { command: row.command, event: row.event });
+    const bits = [row.event + " test: " + r.detail];
+    if ((r.stdout || "").trim()) bits.push("stdout: " + r.stdout.trim().slice(0, 300));
+    if ((r.stderr || "").trim()) bits.push("stderr: " + r.stderr.trim().slice(0, 300));
+    toast(bits.join(" · "), !r.ok);
+  } catch (e) { toast(e.message, true); }
+}
+
+let SFILTER = { q: "", set: false };
+
 function renderSettings() {
   const el = document.getElementById("settingsview");
   const st = DATA.settings || {};
   el.innerHTML =
     `<div class="sethead">editing <b>${esc(st.path || "")}</b>` +
     ` (source: ${st.source === "claude" ? "shared" : esc(st.source || "")}${st.exists ? "" : ", file will be created on first set"})` +
+    " · changes apply to new sessions" +
     (st.linked ? "" : ' <span class="warn">— not linked into the config dir; link settings.json in the panel above for changes to take effect</span>') +
     "</div>";
   if (st.error) {
@@ -2870,8 +3549,80 @@ function renderSettings() {
     el.appendChild(b);
     return;
   }
+
+  // hooks builder
+  const hooksH = document.createElement("h2");
+  hooksH.textContent = "hooks";
+  el.appendChild(hooksH);
+  const rows = hooksList(st.data || {});
+  const hbar = document.createElement("div");
+  hbar.className = "bar";
+  const note = document.createElement("span");
+  note.style.cssText = "align-self:center;font-size:.75rem;color:var(--fg2);flex:1;min-width:12rem";
+  note.textContent = rows === null
+    ? "hooks config has a non-standard shape — edit it as raw JSON in the schema list below"
+    : "lifecycle commands: each receives the event JSON on stdin; test fires a sample event";
+  hbar.appendChild(note);
+  if (rows !== null) {
+    const addb = document.createElement("button");
+    addb.className = "small primary";
+    addb.textContent = "+ add hook";
+    addb.onclick = hookAdd;
+    hbar.appendChild(addb);
+  }
+  el.appendChild(hbar);
+  for (const row of rows || []) {
+    const d = document.createElement("div");
+    d.className = "drow";
+    d.innerHTML =
+      `<span class="badge group">${esc(row.event)}</span>` +
+      (row.matcher ? `<span class="badge link">${esc(row.matcher)}</span>` : "") +
+      `<span class="dmsg">${esc(row.command)}</span>` +
+      (row.timeout ? `<span class="badge ok">${esc(String(row.timeout))}s</span>` : "");
+    const tb = document.createElement("button");
+    tb.className = "small";
+    tb.textContent = "test";
+    tb.onclick = () => hookFire(row);
+    d.appendChild(tb);
+    const db = document.createElement("button");
+    db.className = "small danger";
+    db.textContent = "delete";
+    db.onclick = () => hookDelete(row);
+    d.appendChild(db);
+    el.appendChild(d);
+  }
+
+  // schema-driven settings with filter
+  const fbar = document.createElement("div");
+  fbar.className = "bar";
+  fbar.style.marginTop = "1.2rem";
+  const fin = document.createElement("input");
+  fin.type = "search";
+  fin.id = "setq";
+  fin.placeholder = "filter settings…";
+  fin.value = SFILTER.q;
+  fin.oninput = () => {
+    SFILTER.q = fin.value;
+    renderSettings();
+    const nf = document.getElementById("setq");
+    nf.focus();
+    nf.setSelectionRange(nf.value.length, nf.value.length);
+  };
+  fbar.appendChild(fin);
+  const ob = document.createElement("button");
+  ob.className = "small" + (SFILTER.set ? " primary" : "");
+  ob.textContent = "only set";
+  ob.title = "show only keys that are set in the file";
+  ob.onclick = () => { SFILTER.set = !SFILTER.set; renderSettings(); };
+  fbar.appendChild(ob);
+  el.appendChild(fbar);
+
+  const q = SFILTER.q.toLowerCase();
+  const match = (s) =>
+    (!q || s.key.toLowerCase().includes(q) || (s.desc || "").toLowerCase().includes(q)) &&
+    (!SFILTER.set || settingsGet(s.key) !== undefined);
   const cats = {};
-  for (const s of SCHEMA) (cats[s.cat] = cats[s.cat] || []).push(s);
+  for (const s of SCHEMA) if (match(s)) (cats[s.cat] = cats[s.cat] || []).push(s);
   for (const [cat, items] of Object.entries(cats)) {
     const h = document.createElement("h2");
     h.textContent = cat;
@@ -2879,13 +3630,16 @@ function renderSettings() {
     for (const s of items) el.appendChild(settingRow(s));
   }
   const covered = new Set(SCHEMA.map((s) => s.key.split(".")[0]));
-  const extra = Object.keys(st.data || {}).filter((k) => !covered.has(k));
+  const extra = Object.keys(st.data || {})
+    .filter((k) => !covered.has(k))
+    .map((k) => ({ key: k, type: "json",
+      desc: "(not in the documented schema — edited as raw JSON)" }))
+    .filter(match);
   if (extra.length) {
     const h = document.createElement("h2");
     h.textContent = "other keys in file";
     el.appendChild(h);
-    for (const k of extra)
-      el.appendChild(settingRow({ key: k, type: "json", desc: "(not in the documented schema — edited as raw JSON)" }));
+    for (const s of extra) el.appendChild(settingRow(s));
   }
 }
 
@@ -3750,6 +4504,57 @@ async function renderInsight(rescan) {
     el.appendChild(n);
   }
 
+  // permission advisor: Bash prefixes approved often -> propose allow rules
+  if (u.available && u.sessions && u.bash) {
+    const allow = (INSIGHT.allow || []).filter((r) => typeof r === "string");
+    const covered = (prefix) => allow.some((r) => {
+      if (!r.startsWith("Bash(")) return false;
+      const inner = r.slice(5, -1).replace(/:?\*$/, "").trim();
+      return inner && (prefix === inner || prefix.startsWith(inner + " "));
+    });
+    const cand = Object.entries(u.bash)
+      .filter(([p, n]) => n >= 5 && !covered(p))
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15);
+    if (cand.length) {
+      const h = document.createElement("h2");
+      h.textContent = "permission advisor — frequent Bash commands with no allow rule";
+      el.appendChild(h);
+      const note = document.createElement("div");
+      note.className = "sethead";
+      note.textContent = "these ran repeatedly across your sessions; an allow rule in settings.json skips the permission prompt for them";
+      el.appendChild(note);
+      const t = document.createElement("table");
+      t.className = "itable";
+      t.innerHTML = "<tr><th>command</th><th>uses</th><th>proposed rule</th><th></th></tr>";
+      for (const [prefix, n] of cand) {
+        const rule = "Bash(" + prefix + ":*)";
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          `<td>${esc(prefix)}</td><td class="num">${n}</td>` +
+          `<td class="dim">${esc(rule)}</td>`;
+        const td = document.createElement("td");
+        const b = document.createElement("button");
+        b.className = "small";
+        b.textContent = "allow";
+        b.onclick = async () => {
+          try {
+            await api("/api/settings-set", { key: "permissions.allow",
+              value: [...allow, rule] });
+            toast(rule + " added to permissions.allow");
+            await refresh();
+            INSIGHT = null;
+            renderInsight();
+          } catch (e) { toast(e.message, true); }
+        };
+        td.appendChild(b);
+        tr.appendChild(td);
+        t.appendChild(tr);
+      }
+      el.appendChild(t);
+    }
+  }
+
   const bar2 = document.createElement("div");
   bar2.className = "bar";
   const rb = document.createElement("button");
@@ -3760,6 +4565,116 @@ async function renderInsight(rescan) {
   rb.onclick = () => renderInsight(true);
   bar2.appendChild(rb);
   el.appendChild(bar2);
+}
+
+let COSTS = null;
+
+function usd(n) {
+  if (n >= 100) return "$" + Math.round(n);
+  if (n >= 1) return "$" + n.toFixed(2);
+  return "$" + n.toFixed(3);
+}
+
+async function renderCosts(rescan) {
+  const el = document.getElementById("costsview");
+  if (!COSTS || rescan) {
+    el.innerHTML = '<div class="empty">reading transcripts and pricing usage…</div>';
+    try { COSTS = await api("/api/costs" + (rescan ? "?rescan" : "")); }
+    catch (e) {
+      el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>";
+      return;
+    }
+    if (TAB !== "costs") return;
+  }
+  const c = COSTS;
+  el.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "sethead";
+  head.innerHTML =
+    "estimated API-price cost of your Claude Code usage, computed locally from " +
+    "the transcripts in <b>" + esc(c.dir) + "</b> (input/output/cache tokens × " +
+    "list prices; cache writes at 1.25×, cache reads at 0.1×). On a Pro/Max " +
+    "subscription this shows what the same usage <i>would</i> cost via the API.";
+  el.appendChild(head);
+  if (!c.available || !c.sessions) {
+    el.innerHTML += '<div class="empty">no transcripts found — cost data appears once Claude Code has recorded sessions on this machine</div>';
+    return;
+  }
+  const tiles = document.createElement("div");
+  tiles.className = "tiles";
+  const tile = (num, lbl) =>
+    `<div class="tile"><div class="tnum">${num}</div><div class="tlbl">${lbl}</div></div>`;
+  tiles.innerHTML =
+    tile(usd(c.totals.today), "today") +
+    tile(usd(c.totals.last7), "last 7 days") +
+    tile(usd(c.totals.month), "month to date") +
+    tile(usd(c.totals.all), "all time") +
+    tile(usd(c.cache_savings), "saved by caching");
+  el.appendChild(tiles);
+
+  if (c.days.length) {
+    const max = Math.max(...c.days.map((d) => d.cost), 0.0001);
+    const chart = document.createElement("div");
+    chart.className = "chart";
+    for (const d of c.days) {
+      const bar = document.createElement("div");
+      bar.className = "cbar";
+      bar.style.height = Math.max(2, (d.cost / max) * 100) + "%";
+      bar.title = d.day + ": " + usd(d.cost) + "\\n" +
+        Object.entries(d.by).map(([m, v]) => m + ": " + usd(v)).join("\\n");
+      chart.appendChild(bar);
+    }
+    el.appendChild(chart);
+    const key = document.createElement("div");
+    key.className = "chartkey";
+    key.innerHTML = `<span>${esc(c.days[0].day)}</span>` +
+      `<span>daily cost, last ${c.days.length} active days</span>` +
+      `<span>${esc(c.days[c.days.length - 1].day)}</span>`;
+    el.appendChild(key);
+  }
+
+  const table = (title, headers, rows) => {
+    const h = document.createElement("h2");
+    h.textContent = title;
+    el.appendChild(h);
+    const t = document.createElement("table");
+    t.className = "itable";
+    t.innerHTML = "<tr>" + headers.map((x) => `<th>${x}</th>`).join("") + "</tr>";
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = r;
+      t.appendChild(tr);
+    }
+    el.appendChild(t);
+  };
+
+  table("by model", ["model", "cost", "input", "output", "cache read", "msgs"],
+    c.by_model.map((m) =>
+      `<td>${esc(m.model)}</td><td class="num">${usd(m.cost)}</td>` +
+      `<td class="dim">${tokfmt(m.in)}</td><td class="dim">${tokfmt(m.out)}</td>` +
+      `<td class="dim">${tokfmt(m.cacheR)}</td><td class="dim">${m.msgs}</td>`));
+
+  if (c.by_project.length > 1)
+    table("by project", ["project", "cost", "assistant msgs"],
+      c.by_project.map((p) =>
+        `<td>${esc(p.cwd.replace(/^\\/(home|Users)\\/[^\\/]+/, "~"))}</td>` +
+        `<td class="num">${usd(p.cost)}</td><td class="dim">${p.msgs}</td>`));
+
+  if (c.unknown_models.length) {
+    const b = document.createElement("div");
+    b.className = "banner warn";
+    b.textContent = "no list price known for: " + c.unknown_models.join(", ") +
+      " — priced at opus-tier; override via 'pricing' in .claude-ui.json";
+    el.appendChild(b);
+  }
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  const rb = document.createElement("button");
+  rb.className = "small";
+  rb.textContent = "rescan transcripts";
+  rb.onclick = () => renderCosts(true);
+  bar.appendChild(rb);
+  el.appendChild(bar);
 }
 
 async function renderDoctor(rerun) {
@@ -3947,6 +4862,10 @@ function renderGroups() {
     chip.innerHTML =
       esc(g.name) + "/ · " + g.members + (g.collection ? " (collection)" : "") +
       (warn ? ' <span class="warn">⚠ ' + esc(warn) + "</span>" : "") +
+      (g.collection
+        ? ` <a href="/api/export?collection=${encodeURIComponent(g.name)}"` +
+          ` style="color:var(--blue)" title="export collection as zip">⤓</a>`
+        : "") +
       (g.removable && !g.members && !g.loose_files
         ? ` <a href="#" onclick="removeGroup('${g.name}');return false" title="remove empty folder">×</a>`
         : "");
@@ -3974,6 +4893,98 @@ async function openItemEditor(scope, name, file, type) {
   } catch (e) { toast(e.message, true); }
 }
 
+// Minimal markdown renderer for the editor preview (headings, lists, code
+// fences, inline code/bold/italic/links, blockquotes) — enough to sanity-check
+// a SKILL.md without any dependency.
+function md2html(src) {
+  const inline = (s) => esc(s)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/\*([^*]+)\*/g, "<i>$1</i>")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  let html = "";
+  let inCode = false, inList = null, para = [];
+  const flushPara = () => {
+    if (para.length) { html += "<p>" + para.map(inline).join(" ") + "</p>"; para = []; }
+  };
+  const closeList = () => {
+    if (inList) { html += "</" + inList + ">"; inList = null; }
+  };
+  for (const line of src.split("\\n")) {
+    if (line.trim().startsWith("```")) {
+      flushPara(); closeList();
+      html += inCode ? "</code></pre>" : "<pre><code>";
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { html += esc(line) + "\\n"; continue; }
+    let m;
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      flushPara(); closeList();
+      const n = m[1].length;
+      html += `<h${n}>${inline(m[2])}</h${n}>`;
+    } else if (/^\s*(---+|\*\*\*+)\s*$/.test(line)) {
+      flushPara(); closeList();
+      html += "<hr>";
+    } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+      flushPara();
+      if (inList !== "ul") { closeList(); html += "<ul>"; inList = "ul"; }
+      html += "<li>" + inline(m[1]) + "</li>";
+    } else if ((m = line.match(/^\s*\d+\.\s+(.*)$/))) {
+      flushPara();
+      if (inList !== "ol") { closeList(); html += "<ol>"; inList = "ol"; }
+      html += "<li>" + inline(m[1]) + "</li>";
+    } else if ((m = line.match(/^>\s?(.*)$/))) {
+      flushPara(); closeList();
+      html += "<blockquote>" + inline(m[1]) + "</blockquote>";
+    } else if (!line.trim()) {
+      flushPara(); closeList();
+    } else {
+      para.push(line);
+    }
+  }
+  flushPara(); closeList();
+  if (inCode) html += "</code></pre>";
+  return html;
+}
+
+function edSync() {
+  const ta = document.getElementById("fileeditor");
+  if (ta) EDITING.content = ta.value;
+}
+
+async function edHistory() {
+  edSync();
+  try {
+    const r = await api("/api/history", { path: EDITING.path });
+    EDITING.hist = r.commits;
+    if (!r.commits.length) toast("no git history for " + EDITING.path);
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function edAssist() {
+  edSync();
+  const r = await modal({ title: "✨ ask claude",
+    text: "runs `claude -p` locally with this file (uses your own Claude Code auth; can take a minute)",
+    fields: [
+      { id: "m", label: "task", type: "select", options: [
+        { value: "improve", label: "improve — tighten description & triggers, return revised file" },
+        { value: "review", label: "review — list concrete problems, no changes" },
+        { value: "custom", label: "custom instruction…" }] },
+      { id: "c", label: "custom instruction (for custom)",
+        placeholder: "e.g. add a 'Use when' trigger list for CI debugging" }],
+    ok: "run" });
+  if (!r) return;
+  toast("asking claude… (this can take a while)");
+  try {
+    const res = await api("/api/assist", { mode: r.m, custom: r.c,
+      content: EDITING.content, path: EDITING.path });
+    EDITING.assist = { text: res.result, replaces: res.replaces };
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
 function renderEditor() {
   const el = document.getElementById("editorview");
   const f = EDITING;
@@ -3982,6 +4993,8 @@ function renderEditor() {
     (f.item
       ? (f.exists ? "" : " (new file — created on save)")
       : ` (source: ${f.source === "claude" ? "shared" : esc(f.source)}${f.exists ? "" : ", new file"})`) +
+    (f.id === "CLAUDE.md" || f.id === "settings.json" ? " · applies to new sessions" : "") +
+    (f.viewingRev ? ` <span class="warn">— viewing ${esc(f.viewingRev.slice(0, 8))} from git history; save to restore this version</span>` : "") +
     `</div>`;
   if (f.item && f.files && f.files.length > 1) {
     const tabs = document.createElement("div");
@@ -3990,28 +5003,105 @@ function renderEditor() {
       const b = document.createElement("button");
       b.className = "small" + (name === f.file ? " on" : "");
       b.textContent = name;
-      b.onclick = () => openItemEditor(f.scope, f.name, name, f.type);
+      b.onclick = () => { openItemEditor(f.scope, f.name, name, f.type); };
       tabs.appendChild(b);
     }
     el.appendChild(tabs);
   }
-  const ta = document.createElement("textarea");
-  ta.id = "fileeditor";
-  ta.rows = 24;
-  ta.className = "fedit";
-  ta.value = f.content;
-  el.appendChild(ta);
+  if (f.hist) {
+    const hp = document.createElement("div");
+    hp.className = "ftabs";
+    for (const c of f.hist.slice(0, 12)) {
+      const b = document.createElement("button");
+      b.className = "small" + (f.viewingRev === c.rev ? " on" : "");
+      b.textContent = c.date + " · " + c.subject.slice(0, 44);
+      b.title = c.rev;
+      b.onclick = async () => {
+        try {
+          const r = await api("/api/history-show", { rev: c.rev, path: f.path });
+          f.content = r.content;
+          f.viewingRev = c.rev;
+          render();
+        } catch (e) { toast(e.message, true); }
+      };
+      hp.appendChild(b);
+    }
+    const x = document.createElement("button");
+    x.className = "small";
+    x.textContent = "× close history";
+    x.onclick = () => { edSync(); delete f.hist; delete f.viewingRev; render(); };
+    hp.appendChild(x);
+    el.appendChild(hp);
+  }
+  const isMd = (f.item ? f.file : f.path || "").endsWith(".md");
+  if (f.preview && isMd) {
+    const pv = document.createElement("div");
+    pv.className = "mdprev";
+    pv.innerHTML = md2html(f.content || "");
+    el.appendChild(pv);
+  } else {
+    const ta = document.createElement("textarea");
+    ta.id = "fileeditor";
+    ta.rows = 24;
+    ta.className = "fedit";
+    ta.value = f.content;
+    ta.oninput = () => { f.content = ta.value; };
+    el.appendChild(ta);
+  }
+  if (f.assist) {
+    const ap = document.createElement("div");
+    ap.className = "assistout";
+    ap.textContent = f.assist.text;
+    el.appendChild(ap);
+    const abar = document.createElement("div");
+    abar.className = "bar";
+    abar.style.marginTop = ".5rem";
+    if (f.assist.replaces) {
+      const use = document.createElement("button");
+      use.className = "small primary";
+      use.textContent = "use result";
+      use.onclick = () => {
+        f.content = f.assist.text;
+        delete f.assist;
+        render();
+      };
+      abar.appendChild(use);
+    }
+    const dis = document.createElement("button");
+    dis.className = "small";
+    dis.textContent = "dismiss";
+    dis.onclick = () => { edSync(); delete f.assist; render(); };
+    abar.appendChild(dis);
+    el.appendChild(abar);
+  }
   const bar = document.createElement("div");
   bar.className = "bar";
   bar.style.marginTop = ".75rem";
-  bar.innerHTML =
-    `<button class="primary" onclick="saveFile()">save</button>` +
-    `<button onclick="closeEditor()">close</button>`;
+  const btn = (label, fn, cls, title) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    if (cls) b.className = cls;
+    if (title) b.title = title;
+    b.onclick = fn;
+    bar.appendChild(b);
+    return b;
+  };
+  btn("save", saveFile, "primary");
+  if (isMd)
+    btn(f.preview ? "edit" : "preview", () => {
+      edSync();
+      f.preview = !f.preview;
+      render();
+    }, f.preview ? "small on" : "small");
+  btn("history", edHistory, "small", "git history of this file — view & restore old versions");
+  btn("✨ assist", edAssist, "small", "ask Claude (via the claude CLI) to improve or review this file");
+  btn("close", closeEditor);
   el.appendChild(bar);
 }
 
 async function saveFile() {
-  const content = document.getElementById("fileeditor").value;
+  edSync();
+  const content = EDITING.content;
   try {
     if (EDITING.item) {
       await api("/api/item-save", { type: EDITING.type, scope: EDITING.scope,
@@ -4021,6 +5111,10 @@ async function saveFile() {
     }
     toast(EDITING.path + " saved");
     EDITING.exists = true;
+    if (EDITING.viewingRev) {
+      delete EDITING.viewingRev;
+      render();
+    }
     if (EDITING.item && EDITING.files && !EDITING.files.includes(EDITING.file))
       EDITING.files.push(EDITING.file);
   } catch (e) { toast(e.message, true); }
@@ -4037,7 +5131,7 @@ function render() {
   renderGit();
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
-    insight: "insightview", doctor: "doctorview" };
+    insight: "insightview", costs: "costsview", doctor: "doctorview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   if (isEditor) {
@@ -4053,6 +5147,7 @@ function render() {
   if (TAB === "mcp") { renderMcp(); return; }
   if (TAB === "statusline") { renderStatusline(); return; }
   if (TAB === "insight") { renderInsight(); return; }
+  if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
   renderGroups();
   const q = document.getElementById("q").value.toLowerCase();
@@ -4086,6 +5181,17 @@ function render() {
       row.innerHTML =
         `<span class="name" title="${esc(s.path || "")}">${esc(s.name)}</span>` + badges +
         `<span class="desc">${esc(s.description || "")}</span>`;
+      const key = scope + "\\t" + s.name;
+      const ck = document.createElement("input");
+      ck.type = "checkbox";
+      ck.title = "select for bulk actions";
+      ck.checked = BULK.has(key);
+      ck.onchange = () => {
+        if (ck.checked) BULK.add(key);
+        else BULK.delete(key);
+        renderBulkBar();
+      };
+      row.prepend(ck);
       const act = document.createElement("span");
       act.className = "actions";
       const btn = (label, fn, cls, title) => {
@@ -4103,17 +5209,69 @@ function render() {
         entries.push({ label: "rename…", fn: () => renameItem(s.name) });
         entries.push({ label: "duplicate…", fn: () => duplicateItem(s.name) });
       }
+      if (!s.broken)
+        entries.push({ label: "export zip", fn: () => {
+          location.href = "/api/export?type=" + encodeURIComponent(TAB) +
+            "&scope=" + scope + "&name=" + encodeURIComponent(s.name);
+        } });
       entries.push(scope === "active"
         ? { label: "archive", fn: () => doAct("archive", s.name) }
         : { label: "restore", fn: () => doAct("restore", s.name) });
       entries.push({ label: "delete…", danger: true,
         fn: () => doDelete(scope, s.name, s.managed) });
       btn("⋯", (e) => { e.stopPropagation(); openMenu(e.currentTarget, entries); },
-        null, "move, rename, duplicate, archive, delete");
+        null, "move, rename, duplicate, export, archive, delete");
       row.appendChild(act);
       box.appendChild(row);
     }
   }
+  renderBulkBar();
+}
+
+const BULK = new Set();
+
+function renderBulkBar() {
+  const el = document.getElementById("bulkbar");
+  el.hidden = BULK.size === 0;
+  el.innerHTML = "";
+  if (!BULK.size) return;
+  const lbl = document.createElement("span");
+  lbl.style.cssText = "align-self:center;font-size:.8rem;color:var(--fg2)";
+  lbl.textContent = BULK.size + " selected";
+  el.appendChild(lbl);
+  const btn = (label, fn, cls) => {
+    const b = document.createElement("button");
+    b.className = "small" + (cls ? " " + cls : "");
+    b.textContent = label;
+    b.onclick = fn;
+    el.appendChild(b);
+  };
+  const parts = () => [...BULK].map((k) => {
+    const i = k.indexOf("\\t");
+    return { scope: k.slice(0, i), name: k.slice(i + 1) };
+  });
+  const run = async (fn, done) => {
+    let ok = 0, fail = 0;
+    for (const p of parts()) {
+      try { await fn(p); ok++; }
+      catch (e) { fail++; toast(p.name + ": " + e.message, true); }
+    }
+    BULK.clear();
+    toast(done + " " + ok + " item(s)" + (fail ? ", " + fail + " failed" : ""), !!fail);
+    await refresh();
+  };
+  btn("archive", () => run(async (p) => {
+    if (p.scope === "active") await api("/api/archive", { type: TAB, name: p.name });
+  }, "archived"));
+  btn("restore", () => run(async (p) => {
+    if (p.scope === "archived") await api("/api/restore", { type: TAB, name: p.name });
+  }, "restored"));
+  btn("delete", async () => {
+    if (!(await mconfirm("delete " + BULK.size + " item(s)",
+      "All moved to archive/trash (undoable via doctor until purged).", "delete"))) return;
+    run((p) => api("/api/delete", { type: TAB, scope: p.scope, name: p.name }), "deleted");
+  }, "danger");
+  btn("clear", () => { BULK.clear(); render(); });
 }
 
 const SCHEMA = __SCHEMA__;
@@ -4175,6 +5333,32 @@ async function duplicateItem(name) {
   } catch (e) { toast(e.message, true); }
 }
 
+async function importUrl() {
+  const r = await modal({ title: "import from GitHub",
+    text: "repo root, branch, or subdir URL — a config-shaped repo (skills/, commands/, CLAUDE.md…) imports as a collection",
+    fields: [
+      { id: "u", label: "URL",
+        placeholder: "https://github.com/owner/repo[/tree/branch[/subdir]]" },
+      { id: "n", label: TAB === "skills"
+        ? "import as (skill / group / collection name)"
+        : "import into (folder or collection name)" }],
+    ok: "import" });
+  if (!r || !r.u || !r.n) return;
+  toast("downloading " + r.u + "…");
+  try {
+    const res = await api("/api/import-url", { url: r.u, name: r.n, type: TAB });
+    toast("imported " + res.kind + " " + res.path + " (" + res.files + " files)");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function genBootstrap() {
+  try {
+    const r = await api("/api/bootstrap", {});
+    toast(r.path + " written — commit it; on a new machine, clone + ./bootstrap.sh links everything and applies MCP servers");
+  } catch (e) { toast(e.message, true); }
+}
+
 async function newGroup() {
   const r = await modal({ title: "new folder", text: "'work' stays out of git",
     fields: [{ id: "n", label: "name" }], ok: "create" });
@@ -4196,12 +5380,22 @@ async function removeGroup(name) {
 
 async function doDelete(scope, name, managed) {
   const msg = managed
-    ? "Permanently deletes " + name + " and the files inside its folder."
-    : "Permanently deletes " + name + ". (A symlink's target is untouched.)";
+    ? "Deletes " + name + " and the files inside its folder (moved to archive/trash, undoable)."
+    : "Deletes " + name + " (moved to archive/trash, undoable; a symlink's target is untouched).";
   if (!(await mconfirm("delete " + name, msg, "delete"))) return;
   try {
-    await api("/api/delete", { type: TAB, scope, name });
-    toast(name + " deleted");
+    const res = await api("/api/delete", { type: TAB, scope, name });
+    if (res.trash) {
+      toast(name + " deleted", false, { label: "undo", fn: async () => {
+        try {
+          await api("/api/undelete", { token: res.trash });
+          toast(name + " restored");
+          await refresh();
+        } catch (e) { toast(e.message, true); }
+      } });
+    } else {
+      toast(name + " deleted");
+    }
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -4340,6 +5534,29 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// Live reload: poll a cheap server-side fingerprint; refresh when files change
+// externally (another editor, a running Claude session). Paused while typing,
+// editing, or any overlay is open.
+let FP = null;
+setInterval(async () => {
+  if (document.hidden || EDITING || PAL) return;
+  if (!document.getElementById("modal").hidden) return;
+  if (document.getElementById("menu")) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
+  try {
+    const r = await fetch("/api/fingerprint");
+    if (!r.ok) return;
+    const j = await r.json();
+    if (FP !== null && j.fp !== FP) {
+      FP = j.fp;
+      await refresh();
+    } else {
+      FP = j.fp;
+    }
+  } catch (e) { /* server briefly unavailable — retry next tick */ }
+}, 4000);
+
 refresh();
 </script>
 """
@@ -4349,11 +5566,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def send(self, code, body, ctype="application/json"):
-        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+    def send(self, code, body, ctype="application/json", extra=None):
+        if isinstance(body, bytes):
+            data = body
+        else:
+            data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("content-type", ctype)
         self.send_header("content-length", str(len(data)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
@@ -4376,10 +5598,31 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, PAGE.replace("__SCHEMA__", json.dumps(SETTINGS_SCHEMA))
                               .replace("__TOKEN__", TOKEN),
                       "text/html; charset=utf-8")
-        elif self.path == "/favicon.ico":
+        elif self.path in ("/favicon.ico", "/icon.svg"):
             self.send(200, "<svg xmlns='http://www.w3.org/2000/svg' "
                            "viewBox='0 0 16 16'><text y='13' font-size='13'>"
                            "⚙️</text></svg>", "image/svg+xml")
+        elif self.path == "/manifest.webmanifest":
+            self.send(200, {"name": "claude config", "short_name": "claude-ui",
+                            "start_url": "/", "display": "standalone",
+                            "background_color": "#282828", "theme_color": "#282828",
+                            "icons": [{"src": "/icon.svg", "sizes": "any",
+                                       "type": "image/svg+xml"}]},
+                      "application/manifest+json")
+        elif self.path == "/api/fingerprint":
+            self.send(200, {"fp": fingerprint()})
+        elif self.path.startswith("/api/export?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            get = lambda k: (q.get(k) or [""])[0]
+            try:
+                data, fname = export_zip(get("type") or None,
+                                         get("scope") or "active",
+                                         get("name") or None,
+                                         get("collection") or None)
+                self.send(200, data, "application/zip",
+                          {"content-disposition": f'attachment; filename="{fname}"'})
+            except (ValueError, OSError) as e:
+                self.send(400, {"error": str(e)})
         elif self.path == "/api/state":
             reconcile_links()
             types = {}
@@ -4433,7 +5676,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/insight"):
             rescan = "rescan" in self.path
             self.send(200, {"budget": insight_budget(),
-                            "usage": usage_stats(rescan=rescan)})
+                            "usage": usage_stats(rescan=rescan),
+                            "allow": (settings_state()["data"]
+                                      .get("permissions", {}) or {}).get("allow", [])})
+        elif self.path.startswith("/api/costs"):
+            self.send(200, cost_stats(rescan="rescan" in self.path))
         elif self.path == "/api/doctor":
             self.send(200, doctor())
         else:
@@ -4490,14 +5737,14 @@ class Handler(BaseHTTPRequestHandler):
                            else SK_ARCHIVE / sm[0]) / sm[1]
             if scope == "active" and content and path.is_symlink() and content.is_dir():
                 path.unlink()
-                shutil.rmtree(content)
+                return {"ok": True, "trash": trash_put(content, "skills", scope, name)}
             elif (scope == "archived" and content and content.is_dir()
                     and not (path.exists() or path.is_symlink())):
-                shutil.rmtree(content)
+                return {"ok": True, "trash": trash_put(content, "skills", scope, name)}
             elif path.is_symlink():
                 path.unlink()
             elif path.is_dir():
-                shutil.rmtree(path)
+                return {"ok": True, "trash": trash_put(path, "skills", scope, name)}
             else:
                 raise ValueError(f"{name}: not found")
         elif action == "move":
@@ -4646,8 +5893,10 @@ class Handler(BaseHTTPRequestHandler):
             if scope not in ("active", "archived"):
                 raise ValueError("bad scope")
             path = md_path(type_, scope, name)
-            if path.is_symlink() or path.is_file():
+            if path.is_symlink():
                 path.unlink()
+            elif path.is_file():
+                return {"ok": True, "trash": trash_put(path, type_, scope, name)}
             else:
                 raise ValueError(f"{name}: not found")
         elif action == "move":
@@ -4809,6 +6058,32 @@ class Handler(BaseHTTPRequestHandler):
                 doctor_fix(req.get("action", ""), req.get("path", ""))
                 self.send(200, {"ok": True})
                 return
+            if action == "hook-test":
+                self.send(200, hook_test(req.get("command", ""), req.get("event", "")))
+                return
+            if action == "history":
+                self.send(200, {"ok": True, "commits": file_history(req.get("path", ""))})
+                return
+            if action == "history-show":
+                self.send(200, {"ok": True, "content": file_at_rev(
+                    req.get("rev", ""), req.get("path", ""))})
+                return
+            if action == "assist":
+                self.send(200, assist(req.get("mode", ""), req.get("custom", ""),
+                                      req.get("content", ""), req.get("path", "")))
+                return
+            if action == "undelete":
+                meta = undelete(req.get("token", ""))
+                self.send(200, {"ok": True, "name": meta.get("name", "")})
+                return
+            if action == "import-url":
+                self.send(200, {"ok": True, **import_from_url(
+                    req.get("url", ""), (req.get("name") or "").strip(),
+                    req.get("type", "skills"))})
+                return
+            if action == "bootstrap":
+                self.send(200, {"ok": True, "path": write_bootstrap()})
+                return
             if action == "statusline-save":
                 statusline_save(req.get("config"), bool(req.get("apply")))
                 self.send(200, {"ok": True})
@@ -4899,8 +6174,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=7333)
     ap.add_argument("--no-open", action="store_true", help="don't open a browser")
+    ap.add_argument("--link-all", action="store_true",
+                    help="headless: link every mapping into the config dir, "
+                         "apply MCP servers, and exit (used by bootstrap.sh)")
     args = ap.parse_args()
     migrate_legacy_work()
+    if args.link_all:
+        link_all()
+        return
     srv = None
     for port in range(args.port, args.port + 20):
         try:
