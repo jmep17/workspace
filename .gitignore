@@ -10,3 +10,4 @@ agents/work
 output-styles/work
 archive/*/work/
 archive/skills/work-*
+__pycache__/
