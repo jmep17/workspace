@@ -127,9 +127,14 @@ GitHub URL + export zip, #41 plugin shadow check (doctor), #44 trash + undo
 toast (purge via doctor), #45 per-item git history with restore, #46 restart-
 awareness notes, #49 bulk select, #51 live reload (fingerprint polling), #52
 PWA manifest, #16 markdown preview.
+#26 file split landed (2026-07-19, third pass): bin/claude-ui is now a thin
+launcher over the bin/claude_ui/ package (13 Python modules in a clean
+dependency DAG) with the frontend as real files in bin/claude_ui/static/
+(index.html, style.css, app.js) — HTML/CSS/JS finally get syntax highlighting
+and linting.
 Still open: #35 frontmatter-as-form, #36 keybindings builder, #39 machine
 manifest, #42 project registry, #48 content-grep search, #50 drag-and-drop
-import, #26 file split, #28 tests.
+import, #28 tests.
 
 Ambition level up: not just "manage the files" but own the whole config
 lifecycle — insight, authoring, distribution, and safety. Grouped by theme;

@@ -24,19 +24,23 @@ HOME="$S/home" python3 "$S/apprepo/bin/claude-ui" --no-open --port 7455 &
   POST `/api/new`, `/api/rename`, `/api/git-diff`, etc. Errors come back as
   `{"error": ...}` with HTTP 400.
 
-## Syntax checks (both embedded languages)
+## Layout & syntax checks
+
+The app is a package: `bin/claude-ui` is a thin launcher; Python lives in
+`bin/claude_ui/*.py` (core → items/links/uploads/mcp/settings → statusline/
+insight/gitops/assist/transfer → doctor → server, a clean DAG); the frontend
+is real files in `bin/claude_ui/static/` (index.html, style.css, app.js),
+served with `__SCHEMA__`/`__TOKEN__` substituted into index.html only.
+`REPO` is derived in `core.py` via `parents[2]` — if paths ever look wrong
+(reads/writes landing under `bin/`), check that first.
 
 ```bash
-python3 -m py_compile bin/claude-ui
-# extract the inline <script> and check it with node:
-python3 -c "
-import re
-from importlib.machinery import SourceFileLoader
-mod = SourceFileLoader('cui', 'bin/claude-ui').load_module()
-open('/tmp/app.js','w').write(re.search(r'<script>\n(.*)</script>', mod.PAGE, re.S).group(1))
-"
-node --check /tmp/app.js
+python3 -m py_compile bin/claude_ui/*.py
+node --check bin/claude_ui/static/app.js
 ```
+
+Note: JS strings in app.js are plain — no doubled backslashes; that quirk
+died with the single-file era.
 
 ## Browser drive
 
