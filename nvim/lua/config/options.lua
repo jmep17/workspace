@@ -8,7 +8,7 @@ vim.g.autoformat = true
 local opt = vim.opt
 
 opt.number = true
-opt.relativenumber = true
+opt.relativenumber = false
 opt.cursorline = true
 opt.signcolumn = "yes"
 opt.termguicolors = true
