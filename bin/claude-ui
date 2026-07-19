@@ -35,8 +35,11 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import urllib.error
 import urllib.parse
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -272,15 +275,23 @@ def reconcile_links():
 
 def skill_item(entry, scope, name=None, group=None):
     skill_md = entry / "SKILL.md"
-    meta = parse_frontmatter(skill_md.read_text(errors="replace")) if skill_md.is_file() else {}
+    text = skill_md.read_text(errors="replace") if skill_md.is_file() else ""
+    meta = parse_frontmatter(text)
     n = name or entry.name
+    try:
+        mtime = entry.stat().st_mtime
+    except OSError:
+        mtime = 0
     return {
         "name": n, "scope": scope, "symlink": entry.is_symlink(),
         "group": group, "managed": group is not None,
         "local": n.startswith("work-") or group == "work",
         "broken": False, "incomplete": not skill_md.is_file(),
         "description": meta.get("description", ""),
-        "path": str(entry),
+        "path": str(entry), "mtime": mtime,
+        "todo": "TODO" in text,
+        "name_mismatch": bool(meta.get("name")) and meta["name"] != n,
+        "long_desc": len(meta.get("description", "")) > 1024,
         "movable": scope == "active" and (group is not None or not entry.is_symlink()),
     }
 
@@ -359,6 +370,29 @@ def skill_creation_path(name):
     return group_content_dir(sm[0]) / sm[1] if sm else SKILLS / name
 
 
+def movable_skill(name):
+    """(content_dir, managed_link_or_None) for a skill that can move/rename."""
+    entry = resolve_skill("active", name)
+    sm = split_managed(name)
+    if sm and entry.is_symlink() and (group_content_dir(sm[0]) / sm[1]).is_dir():
+        return group_content_dir(sm[0]) / sm[1], entry
+    if entry.is_dir() and not entry.is_symlink():
+        return entry, None
+    raise ValueError(f"{name}: only real skill dirs and group members can do this")
+
+
+def update_skill_name(d, new):
+    """Keep the frontmatter name: in sync after a rename/duplicate."""
+    md = d / "SKILL.md"
+    if not md.is_file():
+        return
+    text = md.read_text(errors="replace")
+    m = re.match(r"^(---\n)(.*?\n)(---\n?)", text, re.S)
+    if m and re.search(r"(?m)^name:", m.group(2)):
+        fm = re.sub(r"(?m)^name:\s*.*$", "name: " + new, m.group(2), count=1)
+        md.write_text(m.group(1) + fm + m.group(3) + text[m.end():])
+
+
 # ---------------------------------------------------------------- md kinds (commands, agents)
 
 def md_rel(name):
@@ -394,9 +428,14 @@ def scan_md(type_, scope):
                 continue
             full = str(Path(prefix) / rel)[:-3] if prefix else str(rel)[:-3]
             broken = p.is_symlink() and not p.exists()
-            meta = {} if broken else parse_frontmatter(p.read_text(errors="replace"))
+            text = "" if broken else p.read_text(errors="replace")
+            meta = parse_frontmatter(text)
             parent = str(Path(full).parent)
             group = parent if parent != "." else None
+            try:
+                mtime = 0 if broken else p.stat().st_mtime
+            except OSError:
+                mtime = 0
             items.append({
                 "name": full, "scope": scope, "symlink": p.is_symlink() and not collection,
                 "group": group, "managed": bool(collection),
@@ -404,7 +443,9 @@ def scan_md(type_, scope):
                 "broken": broken, "incomplete": False,
                 "description": ("(broken symlink: " + str(p.readlink()) + ")") if broken
                                else meta.get("description", ""),
-                "path": str(p),
+                "path": str(p), "mtime": mtime,
+                "todo": "TODO" in text,
+                "long_desc": len(meta.get("description", "")) > 1024,
                 "movable": scope == "active" and not broken,
             })
 
@@ -1479,6 +1520,175 @@ def settings_set(key, value):
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+# ---------------------------------------------------------------- item editing
+
+MAX_EDIT = 2 * 1024 * 1024
+
+
+def _rel_repo(p):
+    try:
+        return str(p.resolve().relative_to(REPO.resolve()))
+    except (OSError, ValueError):
+        return str(p)
+
+
+def item_rel(fname):
+    parts = [p for p in (fname or "").split("/") if p]
+    if not parts or any(p.startswith(".") or p == ".." for p in parts):
+        raise ValueError("bad file name")
+    return Path(*parts)
+
+
+def item_root(type_, scope, name):
+    """Filesystem location of an item: a file for md kinds, a dir for skills."""
+    if TYPES[type_]["kind"] == "md":
+        return md_path(type_, scope, name)
+    if scope == "active":
+        return resolve_skill("active", name)
+    sm = split_managed(name)
+    if sm and (SK_ARCHIVE / sm[0] / sm[1]).is_dir():
+        return SK_ARCHIVE / sm[0] / sm[1]
+    return resolve_skill("archived", name)
+
+
+def item_read(type_, scope, name, fname=None):
+    root = item_root(type_, scope, name)
+    if TYPES[type_]["kind"] == "md":
+        if not root.is_file():
+            raise ValueError(f"{name}: not found")
+        return {"type": type_, "scope": scope, "name": name,
+                "files": [root.name], "file": root.name, "exists": True,
+                "content": root.read_text(errors="replace"),
+                "path": _rel_repo(root)}
+    if not root.is_dir():  # follows the managed symlink
+        raise ValueError(f"{name}: not found")
+    files = sorted(
+        str(p.relative_to(root)) for p in root.rglob("*")
+        if p.is_file() and p.stat().st_size <= MAX_EDIT
+        and not any(part.startswith(".") for part in p.relative_to(root).parts)
+    )[:200]
+    f = fname or ("SKILL.md" if "SKILL.md" in files or not files else files[0])
+    target = root / item_rel(f)
+    return {"type": type_, "scope": scope, "name": name,
+            "files": files, "file": f, "exists": target.is_file(),
+            "content": target.read_text(errors="replace") if target.is_file() else "",
+            "path": _rel_repo(target)}
+
+
+def item_save(type_, scope, name, fname, content):
+    if not isinstance(content, str) or len(content) > MAX_EDIT:
+        raise ValueError("bad content")
+    root = item_root(type_, scope, name)
+    if TYPES[type_]["kind"] == "md":
+        if not root.is_file():
+            raise ValueError(f"{name}: not found")
+        root.write_text(content)
+        return {"path": _rel_repo(root)}
+    if not root.is_dir():
+        raise ValueError(f"{name}: not found")
+    target = root / item_rel(fname or "SKILL.md")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    return {"path": _rel_repo(target)}
+
+
+# ---------------------------------------------------------------- git panel
+
+def _git_repo(*args, timeout=15):
+    try:
+        r = subprocess.run(["git", "-C", str(REPO), *args],
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, str(e)
+    if r.returncode != 0:
+        return None, (r.stderr.strip() or r.stdout.strip()
+                      or f"git exited {r.returncode}")
+    return r.stdout, None
+
+
+def git_state():
+    out, err = _git_repo("status", "--porcelain")
+    if err:
+        return {"error": err, "files": [], "branch": ""}
+    files = []
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        files.append({"xy": line[:2], "path": path.strip('"')})
+    branch, _ = _git_repo("rev-parse", "--abbrev-ref", "HEAD")
+    return {"error": None, "files": files, "branch": (branch or "").strip()}
+
+
+def git_diff(path):
+    st = git_state()
+    row = next((f for f in st["files"] if f["path"] == path), None)
+    if row is None:
+        raise ValueError(f"{path}: not a changed file")
+    if row["xy"] == "??":
+        p = REPO / path
+        if p.is_dir():
+            names = sorted(str(x.relative_to(REPO)) for x in p.rglob("*") if x.is_file())
+            return "untracked directory:\n" + "\n".join("+ " + n for n in names)
+        text = p.read_text(errors="replace") if p.is_file() else ""
+        return "".join("+" + l + "\n" for l in text.splitlines()) or "(empty file)"
+    out, err = _git_repo("diff", "HEAD", "--", path)
+    if err:
+        raise ValueError(err)
+    return out or "(no textual diff)"
+
+
+def git_commit(message):
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError("commit message required")
+    st = git_state()
+    if st["error"]:
+        raise ValueError(st["error"])
+    if not st["files"]:
+        raise ValueError("nothing to commit")
+    _, err = _git_repo("add", "-A")
+    if err:
+        raise ValueError(err)
+    out, err = _git_repo("commit", "-m", message.strip())
+    if err:
+        raise ValueError(err)
+    return (out or "").strip().splitlines()[0] if out else "committed"
+
+
+# ---------------------------------------------------------------- mcp test
+
+def mcp_test(name):
+    row = next((r for r in mcp_state()["servers"] if r["name"] == name), None)
+    if row is None:
+        raise ValueError(f"{name}: unknown server")
+    cfg = row["config"] or {}
+    cmd = cfg.get("command")
+    if cmd:
+        exe = os.path.expanduser(cmd)
+        found = shutil.which(exe)
+        if not found and os.path.isfile(exe) and os.access(exe, os.X_OK):
+            found = exe
+        return {"ok": bool(found),
+                "detail": cmd + (": found at " + found if found
+                                 else ": not found on PATH (or not executable)")}
+    url = cfg.get("url")
+    if not url:
+        raise ValueError("config has neither command nor url")
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "detail": "unsupported url scheme: " + url}
+    try:
+        with urllib.request.urlopen(
+                urllib.request.Request(url, method="HEAD"), timeout=6) as resp:
+            return {"ok": True, "detail": f"HTTP {resp.status}"}
+    except urllib.error.HTTPError as e:
+        # 401/405/406 from an MCP endpoint still proves it's reachable
+        return {"ok": True, "detail": f"reachable (HTTP {e.code})"}
+    except (urllib.error.URLError, OSError) as e:
+        return {"ok": False, "detail": str(getattr(e, "reason", e) or e)}
+
+
 SKILL_TEMPLATE = """---
 name: {name}
 description: TODO — one sentence on what this does, then "Use when ..." triggers.
@@ -1524,14 +1734,26 @@ PAGE = """<!doctype html>
     --bg: #282828; --bg1: #3c3836; --bg2: #504945; --fg: #ebdbb2;
     --fg2: #a89984; --yellow: #fabd2f; --green: #b8bb26; --red: #fb4934;
     --blue: #83a598; --aqua: #8ec07c; --orange: #fe8019;
+    --term: #1d2021; --purple: #d3869b; --shadow: rgba(0, 0, 0, .4);
+  }
+  :root[data-theme=light] {
+    --bg: #fbf1c7; --bg1: #ebdbb2; --bg2: #bdae93; --fg: #3c3836;
+    --fg2: #7c6f64; --yellow: #b57614; --green: #79740e; --red: #9d0006;
+    --blue: #076678; --aqua: #427b58; --orange: #af3a03;
+    --term: #f2e5bc; --purple: #8f3f71; --shadow: rgba(60, 56, 54, .3);
   }
   * { box-sizing: border-box; }
+  html, body { max-width: 100%; overflow-x: clip; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
     font: 15px/1.5 "JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace;
   }
+  input, textarea, select { max-width: 100%; }
   main { max-width: 920px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-  h1 { font-size: 1.3rem; margin: 0 0 .25rem; color: var(--yellow); }
+  .head { display: flex; align-items: baseline; gap: .75rem; }
+  .head .spring { flex: 1; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; color: var(--yellow);
+    overflow-wrap: anywhere; }
   h1 .cfg { color: var(--fg2); font-weight: normal; }
   .sub { color: var(--fg2); margin: 0 0 1.25rem; font-size: .85rem; }
   button {
@@ -1552,47 +1774,63 @@ PAGE = """<!doctype html>
     background: var(--bg1); color: var(--fg); border: 1px solid var(--bg2);
     border-radius: 6px; padding: .2rem .4rem; font: inherit; font-size: .72rem;
   }
-  #links { border: 1px solid var(--bg2); border-radius: 8px; padding: .75rem .9rem; margin-bottom: 1.5rem; }
-  #links summary { cursor: pointer; color: var(--fg2); font-size: .8rem;
+  #links, #git { border: 1px solid var(--bg2); border-radius: 8px; padding: .75rem .9rem; margin-bottom: 1rem; }
+  #links summary, #git summary { cursor: pointer; color: var(--fg2); font-size: .8rem;
     text-transform: uppercase; letter-spacing: .1em; }
-  #links summary .ok { color: var(--green); }
-  #links summary .warn { color: var(--orange); }
+  #links summary .ok, #git summary .ok { color: var(--green); }
+  #links summary .warn, #git summary .warn { color: var(--orange); }
   .lrow { display: flex; align-items: center; gap: .6rem; padding: .4rem 0;
-    border-bottom: 1px solid var(--bg1); font-size: .82rem; }
+    border-bottom: 1px solid var(--bg1); font-size: .82rem; flex-wrap: wrap; }
   .lrow:last-child { border-bottom: 0; }
-  .lrow .lname { min-width: 11rem; flex-shrink: 0; padding-right: .4rem; color: var(--aqua); }
-  .lrow .lstat { flex: 1; color: var(--fg2); }
+  .lrow .lname { min-width: 11rem; padding-right: .4rem; color: var(--aqua);
+    overflow-wrap: anywhere; }
+  .lrow .lstat { flex: 1; min-width: 10rem; color: var(--fg2); overflow-wrap: anywhere; }
   .lrow .lstat.ok { color: var(--green); }
   .lrow .lstat.warn { color: var(--orange); }
+  .gxy { color: var(--orange); min-width: 2ch; white-space: pre; }
+  .diff { background: var(--term); border: 1px solid var(--bg2); border-radius: 6px;
+    padding: .5rem .7rem; font-size: .72rem; line-height: 1.45; overflow-x: auto;
+    margin: .2rem 0 .5rem; max-width: 100%; flex-basis: 100%; }
+  .diff .add { color: var(--green); }
+  .diff .del { color: var(--red); }
+  .diff .hunk { color: var(--blue); }
   .cfgdir { display: flex; gap: .6rem; align-items: center; margin-top: .7rem; font-size: .82rem; }
   .cfgdir input { flex: 1; padding: .35rem .6rem; }
   .cfgdir .hint { color: var(--fg2); font-size: .72rem; margin-top: .35rem; }
-  .tabs { display: flex; gap: .25rem; margin-bottom: 1rem; }
+  .tabs { display: flex; gap: .25rem; margin-bottom: 1rem; flex-wrap: wrap; }
   .tabs button { border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent; }
   .tabs button.on { color: var(--yellow); border-bottom-color: var(--yellow); background: var(--bg1); }
-  .bar { display: flex; gap: .75rem; margin-bottom: 1.25rem; }
-  .bar input[type=search] { flex: 1; }
+  .bar { display: flex; gap: .6rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+  .bar input[type=search] { flex: 1; min-width: 8rem; }
   h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .1em;
        color: var(--fg2); margin: 2rem 0 .5rem; }
   h2 .count { color: var(--bg2); }
   .row {
-    display: flex; align-items: baseline; gap: .75rem; padding: .65rem .75rem;
-    border-bottom: 1px solid var(--bg1);
+    display: flex; align-items: baseline; gap: .5rem .75rem; padding: .65rem .75rem;
+    border-bottom: 1px solid var(--bg1); flex-wrap: wrap;
   }
   .row:hover { background: var(--bg1); border-radius: 6px; }
-  .row .name { color: var(--aqua); font-weight: bold; white-space: nowrap; }
+  .row .name { color: var(--aqua); font-weight: bold; overflow-wrap: anywhere; }
   .row.archived .name { color: var(--fg2); }
-  .row .desc { flex: 1; color: var(--fg2); font-size: .82rem;
+  .row .desc { flex: 1 1 12rem; color: var(--fg2); font-size: .82rem;
     overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
     -webkit-box-orient: vertical; }
+  .row .actions { margin-left: auto; }
   .badge { font-size: .68rem; padding: .05rem .45rem; border-radius: 99px;
     border: 1px solid; white-space: nowrap; }
   .badge.local { color: var(--orange); border-color: var(--orange); }
   .badge.group { color: var(--yellow); border-color: var(--yellow); }
   .badge.link { color: var(--blue); border-color: var(--blue); }
   .badge.warn { color: var(--red); border-color: var(--red); }
-  .actions { display: flex; gap: .4rem; }
+  .actions { display: flex; gap: .4rem; flex-wrap: wrap; }
   .actions button { padding: .25rem .6rem; font-size: .72rem; }
+  .menu { position: fixed; background: var(--bg1); border: 1px solid var(--bg2);
+    border-radius: 6px; display: flex; flex-direction: column; z-index: 15;
+    min-width: 9rem; box-shadow: 0 4px 14px var(--shadow); overflow: hidden; }
+  .menu button { border: 0; background: none; text-align: left; border-radius: 0;
+    padding: .45rem .8rem; }
+  .menu button:hover { background: var(--bg2); }
+  .menu button.danger:hover { color: var(--red); }
   .empty { color: var(--bg2); padding: .65rem .75rem; font-size: .85rem; }
   .groups { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
     margin: -.5rem 0 1.25rem; font-size: .75rem; color: var(--fg2); }
@@ -1600,14 +1838,19 @@ PAGE = """<!doctype html>
   .chip.coll { border-color: var(--yellow); }
   .chip .warn { color: var(--red); }
   .chip a { color: var(--red); text-decoration: none; }
-  .srow { display: flex; gap: 1rem; padding: .6rem .75rem;
-    border-bottom: 1px solid var(--bg1); align-items: flex-start; }
+  .srow { display: flex; gap: .5rem 1rem; padding: .6rem .75rem;
+    border-bottom: 1px solid var(--bg1); align-items: flex-start; flex-wrap: wrap; }
   .srow:hover { background: var(--bg1); border-radius: 6px; }
-  .srow .smeta { flex: 1; min-width: 0; }
-  .srow .skey { color: var(--aqua); font-weight: bold; font-size: .85rem; margin-right: .5rem; }
+  .srow .smeta { flex: 1; min-width: min(14rem, 100%); }
+  .srow .skey { color: var(--aqua); font-weight: bold; font-size: .85rem;
+    margin-right: .5rem; overflow-wrap: anywhere; }
   .srow .sdesc { color: var(--fg2); font-size: .75rem; }
   .srow .sctrl { display: flex; gap: .4rem; align-items: flex-start;
-    width: 26rem; max-width: 48%; flex-wrap: wrap; justify-content: flex-end; }
+    width: 26rem; max-width: 100%; flex-wrap: wrap; justify-content: flex-end; }
+  @media (max-width: 720px) {
+    .srow .sctrl { width: 100%; justify-content: flex-start; }
+    .lrow .lname { min-width: 0; }
+  }
   .srow .sctrl input[type=text] { flex: 1; min-width: 10rem; padding: .3rem .5rem; font-size: .78rem; }
   .srow .sctrl textarea { flex: 1; min-width: 14rem; background: var(--bg1);
     border: 1px solid var(--bg2); color: var(--fg); border-radius: 6px;
@@ -1638,8 +1881,11 @@ PAGE = """<!doctype html>
   .stltermhead .dot.g { background: var(--green); }
   .stltermhead .ttl { color: var(--fg2); font-size: .68rem; margin-left: .5rem;
     text-transform: uppercase; letter-spacing: .1em; }
-  .stlpreview { background: #1d2021; padding: .7rem .9rem; line-height: 1.7;
+  .stltermhead .wsel { margin-left: auto; display: flex; gap: .25rem; }
+  .stltermhead .wsel button.on { color: var(--yellow); border-color: var(--yellow); }
+  .stlpreview { background: var(--term); padding: .7rem .9rem; line-height: 1.7;
     font-size: .85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .stlpreview.trunc { white-space: pre; overflow: hidden; max-width: 100%; }
   .stlpreview .psep { color: var(--fg2); opacity: .7; }
   .stlgrid { display: flex; gap: 1rem; align-items: flex-start; }
   .stlbuild { flex: 1; min-width: 0; }
@@ -1697,23 +1943,55 @@ PAGE = """<!doctype html>
     padding: .55rem .75rem; border: 1px solid; border-radius: 6px;
     font-size: .82rem; margin-bottom: 1rem; }
   .banner.warn { color: var(--orange); border-color: var(--orange); }
-  #toast {
+  #toasts {
     position: fixed; bottom: 1.25rem; left: 50%; translate: -50% 0;
-    background: var(--bg2); color: var(--fg); padding: .6rem 1rem;
-    border-radius: 8px; font-size: .85rem; opacity: 0; transition: opacity .2s;
-    pointer-events: none; max-width: 90vw;
+    display: flex; flex-direction: column; gap: .5rem; align-items: center;
+    z-index: 30; max-width: min(92vw, 44rem); width: max-content;
   }
-  #toast.show { opacity: 1; }
-  #toast.err { color: var(--red); }
+  .toastmsg { background: var(--bg2); color: var(--fg); padding: .55rem 1rem;
+    border-radius: 8px; font-size: .85rem; box-shadow: 0 2px 10px var(--shadow);
+    display: flex; gap: .7rem; align-items: baseline; overflow-wrap: anywhere;
+    max-width: 100%; }
+  .toastmsg.err { color: var(--red); }
+  .toastmsg .x { cursor: pointer; opacity: .6; }
+  .toastmsg .x:hover { opacity: 1; }
+  #modal { position: fixed; inset: 0; background: var(--shadow);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 20; padding: 1rem; }
+  #modal[hidden] { display: none; }
+  .mbox { background: var(--bg); border: 1px solid var(--bg2); border-radius: 10px;
+    padding: 1rem 1.1rem; width: 100%; max-width: 30rem;
+    box-shadow: 0 8px 30px var(--shadow); }
+  .mbox h3 { margin: 0 0 .5rem; font-size: .95rem; color: var(--yellow);
+    overflow-wrap: anywhere; }
+  .mbox .mtext { color: var(--fg2); font-size: .8rem; overflow-wrap: anywhere;
+    margin-bottom: .4rem; }
+  .mbox .mrow { margin: .55rem 0; display: flex; flex-direction: column;
+    gap: .25rem; font-size: .8rem; }
+  .mbox .mrow label { color: var(--fg2); }
+  .mbox .mrow input, .mbox .mrow select { width: 100%; padding: .4rem .6rem;
+    font-size: .82rem; }
+  .mbox .mbtns { display: flex; gap: .6rem; justify-content: flex-end;
+    margin-top: .9rem; flex-wrap: wrap; }
+  .ftabs { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .6rem; }
+  .ftabs button.on { color: var(--yellow); border-color: var(--yellow); }
 </style>
 <main>
-  <h1><span class="cfg" id="cfgprefix">~/.claude/</span>config</h1>
-  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Collections (like <b>work/</b>, gitignored) mirror the same shape and merge in automatically. Everything is plain files: review &amp; commit with git as usual.</p>
-  <details id="links" open>
+  <div class="head">
+    <h1><span class="cfg" id="cfgprefix">~/.claude/</span>config</h1>
+    <span class="spring"></span>
+    <button class="small" id="themebtn" title="toggle light/dark theme">◐ theme</button>
+  </div>
+  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Collections (like <b>work/</b>, gitignored) mirror the same shape and merge in automatically. Everything is plain files: review &amp; commit with git — or use the git panel below.</p>
+  <details id="links">
     <summary>links <span id="linksum"></span></summary>
     <div id="linkrows"></div>
     <div class="cfgdir" id="cfgrow"></div>
     <div class="cfgdir hint" id="cfghint"></div>
+  </details>
+  <details id="git">
+    <summary>git <span id="gitsum"></span></summary>
+    <div id="gitbody"></div>
   </details>
   <details id="help">
     <summary>how this works</summary>
@@ -1770,7 +2048,8 @@ PAGE = """<!doctype html>
       folder renames it (<code>tdd</code> → <code>ai-tdd</code>). Nothing here
       touches project-level config (<code>.claude/</code>, <code>.mcp.json</code>
       inside your projects). This page runs locally from your clone and edits
-      plain files — it never commits; review with git as usual.</p>
+      plain files — nothing is committed behind your back; the git panel up top
+      shows what changed, with per-file diffs and an explicit commit button.</p>
     </div>
   </details>
   <div class="tabs" id="tabs"></div>
@@ -1780,7 +2059,11 @@ PAGE = """<!doctype html>
   <div id="settingsview" hidden></div>
   <div id="itemsview">
   <div class="bar">
-    <input type="search" id="q" placeholder="filter…" autofocus>
+    <input type="search" id="q" placeholder="filter…  ( / )" autofocus>
+    <select id="sortsel" title="sort order">
+      <option value="name">a–z</option>
+      <option value="recent">recent</option>
+    </select>
     <button onclick="newGroup()">+ folder</button>
     <button onclick="document.getElementById('up').click()">⇪ folder</button>
     <button onclick="document.getElementById('upf').click()">⇪ files</button>
@@ -1795,10 +2078,12 @@ PAGE = """<!doctype html>
   <div id="archived"></div>
   </div>
 </main>
-<div id="toast"></div>
+<div id="toasts"></div>
+<div id="modal" hidden></div>
 <script>
 let DATA = { types: {}, links: [], config_dir: "", collections: [] };
 let TAB = location.hash.slice(1) || "skills";
+let SORT = "name";
 
 async function api(path, body) {
   const res = await fetch(path, body
@@ -1809,12 +2094,149 @@ async function api(path, body) {
   return json;
 }
 
+// Theme: JS sets data-theme so a manual choice survives reloads.
+(function () {
+  let t = null;
+  try { t = localStorage.getItem("claude-ui-theme"); } catch (e) {}
+  if (t !== "light" && t !== "dark")
+    t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+})();
+
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("claude-ui-theme", t); } catch (e) {}
+}
+
+// Toasts stack; errors stick around until dismissed (they may contain paths).
 function toast(msg, err) {
-  const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.className = "show" + (err ? " err" : "");
-  clearTimeout(el._t);
-  el._t = setTimeout(() => (el.className = ""), err ? 5000 : 2500);
+  const box = document.getElementById("toasts");
+  const el = document.createElement("div");
+  el.className = "toastmsg" + (err ? " err" : "");
+  const span = document.createElement("span");
+  span.textContent = msg;
+  el.appendChild(span);
+  const x = document.createElement("span");
+  x.className = "x";
+  x.textContent = "×";
+  x.onclick = () => el.remove();
+  el.appendChild(x);
+  box.appendChild(el);
+  while (box.children.length > 5) box.firstChild.remove();
+  if (!err) setTimeout(() => el.remove(), 3500);
+}
+
+// Generic modal replacing prompt()/confirm(): resolves to {field: value} on OK,
+// null on cancel/Escape. fields: [{id, label, type: "text"|"select", ...}]
+function modal({ title, text, fields = [], ok = "OK", danger = false }) {
+  return new Promise((resolve) => {
+    const m = document.getElementById("modal");
+    m.hidden = false;
+    m.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "mbox";
+    if (title) {
+      const h = document.createElement("h3");
+      h.textContent = title;
+      box.appendChild(h);
+    }
+    if (text) {
+      const p = document.createElement("div");
+      p.className = "mtext";
+      p.textContent = text;
+      box.appendChild(p);
+    }
+    const inputs = {};
+    for (const f of fields) {
+      const row = document.createElement("div");
+      row.className = "mrow";
+      if (f.label) {
+        const l = document.createElement("label");
+        l.textContent = f.label;
+        row.appendChild(l);
+      }
+      let inp;
+      if (f.type === "select") {
+        inp = document.createElement("select");
+        for (const o of f.options) {
+          const op = document.createElement("option");
+          op.value = o.value !== undefined ? o.value : o;
+          op.textContent = o.label !== undefined ? o.label : o;
+          if (op.value === f.value) op.selected = true;
+          inp.appendChild(op);
+        }
+      } else {
+        inp = document.createElement("input");
+        inp.type = "text";
+        inp.value = f.value || "";
+        if (f.placeholder) inp.placeholder = f.placeholder;
+      }
+      inputs[f.id] = inp;
+      row.appendChild(inp);
+      box.appendChild(row);
+    }
+    const done = (val) => {
+      m.hidden = true;
+      m.innerHTML = "";
+      document.removeEventListener("keydown", onkey, true);
+      resolve(val);
+    };
+    const submit = () => done(Object.fromEntries(
+      Object.entries(inputs).map(([k, i]) => [k, i.value.trim()])));
+    const onkey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); done(null); }
+      else if (e.key === "Enter" && e.target.tagName !== "SELECT") {
+        e.preventDefault();
+        submit();
+      }
+    };
+    document.addEventListener("keydown", onkey, true);
+    m.onclick = (e) => { if (e.target === m) done(null); };
+    const btns = document.createElement("div");
+    btns.className = "mbtns";
+    const cancel = document.createElement("button");
+    cancel.textContent = "cancel";
+    cancel.onclick = () => done(null);
+    const okb = document.createElement("button");
+    okb.textContent = ok;
+    okb.className = danger ? "danger" : "primary";
+    okb.onclick = submit;
+    btns.append(cancel, okb);
+    box.appendChild(btns);
+    m.appendChild(box);
+    const first = Object.values(inputs)[0];
+    (first || okb).focus();
+    if (first && first.select) first.select();
+  });
+}
+
+const mconfirm = (title, text, ok) =>
+  modal({ title, text, ok: ok || "confirm", danger: true }).then((r) => r !== null);
+
+// Small popup menu anchored to a button (row overflow actions).
+function openMenu(anchor, entries) {
+  closeMenu();
+  const m = document.createElement("div");
+  m.className = "menu";
+  m.id = "menu";
+  for (const e of entries) {
+    const b = document.createElement("button");
+    b.textContent = e.label;
+    if (e.danger) b.className = "danger";
+    b.onclick = () => { closeMenu(); e.fn(); };
+    m.appendChild(b);
+  }
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)) + "px";
+  m.style.top = Math.max(8, Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8)) + "px";
+  setTimeout(() => document.addEventListener("click", closeMenu, { once: true }));
+}
+
+function closeMenu() {
+  const m = document.getElementById("menu");
+  if (m) m.remove();
 }
 
 const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -1876,6 +2298,93 @@ function renderLinks() {
   }
   document.getElementById("cfghint").textContent = DATA.default_dir
     ? "" : "non-default config dir: Claude Code only uses it if CLAUDE_CONFIG_DIR is exported in your shell";
+  if (!renderLinks.seen) {  // auto-open only when something needs attention
+    renderLinks.seen = true;
+    document.getElementById("links").open = warn > 0;
+  }
+}
+
+let GITDIFF = {};
+
+function diffEl(text) {
+  const pre = document.createElement("pre");
+  pre.className = "diff";
+  for (const line of text.split("\\n")) {
+    const s = document.createElement("span");
+    s.textContent = line + "\\n";
+    if (line.startsWith("+")) s.className = "add";
+    else if (line.startsWith("-")) s.className = "del";
+    else if (line.startsWith("@@")) s.className = "hunk";
+    pre.appendChild(s);
+  }
+  return pre;
+}
+
+function renderGit() {
+  const g = DATA.git || { files: [], branch: "", error: null };
+  const sum = document.getElementById("gitsum");
+  sum.innerHTML = g.error
+    ? ' — <span class="warn">' + esc(g.error) + "</span>"
+    : g.files.length
+    ? ` — <span class="warn">${g.files.length} changed</span> on ${esc(g.branch)}`
+    : ` — <span class="ok">clean</span> on ${esc(g.branch)}`;
+  const el = document.getElementById("gitbody");
+  el.innerHTML = "";
+  if (g.error) return;
+  if (!g.files.length) {
+    el.innerHTML = '<div class="empty">working tree clean — nothing to commit</div>';
+    return;
+  }
+  const msgVal = el._msg || "";
+  for (const f of g.files) {
+    const row = document.createElement("div");
+    row.className = "lrow";
+    row.innerHTML =
+      `<span class="gxy">${esc(f.xy)}</span>` +
+      `<span class="lstat">${esc(f.path)}</span>`;
+    const b = document.createElement("button");
+    b.className = "small";
+    b.textContent = GITDIFF[f.path] !== undefined ? "hide" : "diff";
+    b.onclick = async () => {
+      if (GITDIFF[f.path] !== undefined) {
+        delete GITDIFF[f.path];
+        renderGit();
+        return;
+      }
+      try {
+        GITDIFF[f.path] = (await api("/api/git-diff", { path: f.path })).diff;
+        renderGit();
+      } catch (e) { toast(e.message, true); }
+    };
+    row.appendChild(b);
+    if (GITDIFF[f.path] !== undefined) row.appendChild(diffEl(GITDIFF[f.path]));
+    el.appendChild(row);
+  }
+  const bar = document.createElement("div");
+  bar.className = "cfgdir";
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.id = "gitmsg";
+  inp.placeholder = "commit message — stages & commits everything above";
+  inp.value = msgVal;
+  inp.oninput = () => { el._msg = inp.value; };
+  bar.appendChild(inp);
+  const cb = document.createElement("button");
+  cb.className = "small primary";
+  cb.textContent = "commit all";
+  cb.onclick = async () => {
+    const msg = inp.value.trim();
+    if (!msg) { toast("commit message required", true); return; }
+    try {
+      const r = await api("/api/git-commit", { message: msg });
+      toast(r.result);
+      GITDIFF = {};
+      el._msg = "";
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+  bar.appendChild(cb);
+  el.appendChild(bar);
 }
 
 async function doSource(id, source) {
@@ -2064,12 +2573,38 @@ function mcpEditPanel() {
   return p;
 }
 
+// Values in env/headers that look like real credentials, so saving them to a
+// committed source can warn first (work/ is gitignored; claude/ is not).
+function mcpSecretHits(cfg) {
+  const hits = [];
+  const scan = (obj) => {
+    if (!obj || typeof obj !== "object") return;
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v !== "string") continue;
+      const placeholder = v === "" || v.includes("${");
+      if (placeholder) continue;
+      if (/token|secret|key|pass|auth/i.test(k) && v.length >= 8) hits.push(k);
+      else if (/^[A-Za-z0-9_-]{32,}$/.test(v)) hits.push(k);
+    }
+  };
+  scan(cfg.env);
+  scan(cfg.headers);
+  return hits;
+}
+
 async function mcpSave() {
   let config;
   try { config = JSON.parse(document.getElementById("mcpjson").value); }
   catch (e) { toast("invalid JSON: " + e.message, true); return; }
   const name = (document.getElementById("mcpname").value || "").trim();
   const source = document.getElementById("mcpsource").value;
+  const hits = source === "work" ? [] : mcpSecretHits(config);
+  if (hits.length && !(await mconfirm(
+    "possible secret in a committed file",
+    hits.join(", ") + " look(s) like a real credential, and " +
+    (source === "claude" ? "claude/" : source + "/") + " is committed to git. " +
+    'Consider "${ENV_VAR}" expansion or the gitignored work/ collection.',
+    "save anyway"))) return;
   try {
     await api("/api/mcp-save", { name, source, config,
       orig_source: MCPEDIT.isNew ? null : MCPEDIT.source });
@@ -2081,11 +2616,18 @@ async function mcpSave() {
 }
 
 async function mcpDelete() {
-  const fromMachine = ["applied", "differs"].includes(MCPEDIT.status)
-    && confirm("Also remove " + MCPEDIT.name + " from this machine's ~/.claude.json?");
-  if (!confirm("Delete " + MCPEDIT.name + " from the repo definition?")) return;
+  const onMachine = ["applied", "differs"].includes(MCPEDIT.status);
+  const fields = onMachine
+    ? [{ id: "m", label: "this machine's ~/.claude.json", type: "select", options: [
+        { value: "", label: "keep the machine copy" },
+        { value: "1", label: "remove from the machine too" }] }]
+    : [];
+  const r = await modal({ title: "delete " + MCPEDIT.name,
+    text: "removes the repo definition", fields, ok: "delete", danger: true });
+  if (r === null) return;
   try {
-    await api("/api/mcp-delete", { name: MCPEDIT.name, source: MCPEDIT.source, from_machine: fromMachine });
+    await api("/api/mcp-delete", { name: MCPEDIT.name, source: MCPEDIT.source,
+      from_machine: !!r.m });
     toast(MCPEDIT.name + " deleted");
     MCPEDIT = null;
     await refresh();
@@ -2102,7 +2644,9 @@ async function mcpApply(name) {
 }
 
 async function mcpRemoveMachine(name) {
-  if (!confirm("Remove " + name + " from this machine's ~/.claude.json? (repo definition, if any, is kept)")) return;
+  if (!(await mconfirm("remove " + name + " from this machine",
+    "Removes it from ~/.claude.json; the repo definition, if any, is kept.",
+    "remove"))) return;
   try {
     await api("/api/mcp-remove-machine", { name });
     toast(name + " removed from machine");
@@ -2114,9 +2658,13 @@ async function mcpAdopt(name) {
   const srcs = ["claude", ...(DATA.collections || [])];
   let source = "claude";
   if (srcs.length > 1) {
-    source = prompt("Adopt into which source? (" + srcs.map((s) => s === "claude" ? "shared" : s).join(", ") + ")", "shared");
-    if (source === null) return;
-    source = source.trim() === "shared" ? "claude" : source.trim();
+    const r = await modal({ title: "adopt " + name,
+      text: "copies this machine's definition into the repo",
+      fields: [{ id: "s", label: "into source", type: "select",
+        options: srcs.map((s) => ({ value: s, label: s === "claude" ? "shared" : s })) }],
+      ok: "adopt" });
+    if (r === null) return;
+    source = r.s;
   }
   try {
     await api("/api/mcp-adopt", { name, source });
@@ -2125,12 +2673,15 @@ async function mcpAdopt(name) {
   } catch (e) { toast(e.message, true); }
 }
 
-function mcpNew() {
-  const name = prompt("Server name:");
-  if (!name) return;
-  const kind = confirm("OK = stdio (local command), Cancel = http/sse (remote URL)") ? "stdio" : "http";
-  MCPEDIT = { name: name.trim(), source: "claude", isNew: true,
-    json: JSON.stringify(MCP_TEMPLATE[kind], null, 2) };
+async function mcpNew() {
+  const r = await modal({ title: "add MCP server", fields: [
+    { id: "n", label: "server name" },
+    { id: "k", label: "transport", type: "select", options: [
+      { value: "stdio", label: "stdio — local command" },
+      { value: "http", label: "http/sse — remote URL" }] }], ok: "create" });
+  if (!r || !r.n) return;
+  MCPEDIT = { name: r.n, source: "claude", isNew: true,
+    json: JSON.stringify(MCP_TEMPLATE[r.k], null, 2) };
   render();
 }
 
@@ -2182,21 +2733,42 @@ function renderMcp() {
       "machine-only": '<span class="badge local">machine only</span>',
       differs: '<span class="badge warn">differs from machine</span>',
     }[s.status] || "";
-    let actions = "";
-    if (s.source)
-      actions += `<button onclick='MCPEDIT={name:${JSON.stringify(s.name)},source:${JSON.stringify(s.source)},status:${JSON.stringify(s.status)},isNew:false,json:${JSON.stringify(JSON.stringify(s.config, null, 2))}};render()'>edit</button>`;
-    if (machineOk && s.source && (s.status === "repo-only" || s.status === "differs"))
-      actions += `<button onclick="mcpApply('${s.name}')">apply</button>`;
-    if (machineOk && (s.status === "machine-only" || s.status === "differs"))
-      actions += `<button onclick="mcpAdopt('${s.name}')">adopt</button>`;
-    if (machineOk && s.status !== "repo-only")
-      actions += `<button class="danger" onclick="mcpRemoveMachine('${s.name}')">remove from machine</button>`;
     row.innerHTML =
       `<span class="name">${esc(s.name)}</span>` + srcBadge + statusBadge +
-      `<span class="desc">${esc(mcpSummary(s.config))}</span>` +
-      `<span class="actions">${actions}</span>`;
+      `<span class="desc">${esc(mcpSummary(s.config))}</span>`;
+    const act = document.createElement("span");
+    act.className = "actions";
+    const btn = (label, fn, cls) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      if (cls) b.className = cls;
+      b.onclick = fn;
+      act.appendChild(b);
+    };
+    if (s.source)
+      btn("edit", () => {
+        MCPEDIT = { name: s.name, source: s.source, status: s.status,
+          isNew: false, json: JSON.stringify(s.config, null, 2) };
+        render();
+      });
+    btn("test", () => mcpTest(s.name));
+    if (machineOk && s.source && (s.status === "repo-only" || s.status === "differs"))
+      btn("apply", () => mcpApply(s.name));
+    if (machineOk && (s.status === "machine-only" || s.status === "differs"))
+      btn("adopt", () => mcpAdopt(s.name));
+    if (machineOk && s.status !== "repo-only")
+      btn("remove from machine", () => mcpRemoveMachine(s.name), "danger");
+    row.appendChild(act);
     el.appendChild(row);
   }
+}
+
+async function mcpTest(name) {
+  toast("testing " + name + "…");
+  try {
+    const r = await api("/api/mcp-test", { name });
+    toast(name + ": " + r.detail, !r.ok);
+  } catch (e) { toast(e.message, true); }
 }
 
 let STL = null;
@@ -2204,7 +2776,8 @@ let STL_DRAG = null;
 
 const STL_COLORS = { yellow: "var(--yellow)", blue: "var(--blue)", green: "var(--green)",
   aqua: "var(--aqua)", orange: "var(--orange)", gray: "var(--fg2)",
-  purple: "#d3869b", red: "var(--red)" };
+  purple: "var(--purple)", red: "var(--red)" };
+let STL_WIDTH = null;  // preview truncation width in columns (null = full)
 
 const STL_MAX_LINES = 4; // the config format has three line-break fields (br1-3)
 
@@ -2473,8 +3046,24 @@ function renderStatusline() {
   term.innerHTML =
     '<div class="stltermhead"><span class="dot r"></span><span class="dot y"></span>' +
     '<span class="dot g"></span><span class="ttl">preview</span></div>';
+  const wsel = document.createElement("span");
+  wsel.className = "wsel";
+  for (const w of [null, 120, 80]) {
+    const b = document.createElement("button");
+    b.className = "small" + (STL_WIDTH === w ? " on" : "");
+    b.textContent = w ? w + " col" : "full";
+    b.title = w ? "truncate the preview at ~" + w + " columns, like a narrow terminal"
+      : "no truncation";
+    b.onclick = () => { STL_WIDTH = w; renderStatusline(); };
+    wsel.appendChild(b);
+  }
+  term.querySelector(".stltermhead").appendChild(wsel);
   const prev = document.createElement("div");
   prev.className = "stlpreview";
+  if (STL_WIDTH) {
+    prev.classList.add("trunc");
+    prev.style.width = "calc(" + STL_WIDTH + "ch + 1.8rem)";
+  }
   const raw = STL.separator;
   const sep = raw.trim()
     ? `<span class="psep">${esc(" " + raw.trim() + " ")}</span>` : esc(raw);
@@ -2692,12 +3281,38 @@ async function openEditor(id) {
   } catch (e) { toast(e.message, true); }
 }
 
+async function openItemEditor(scope, name, file, type) {
+  const t = type || TAB;
+  try {
+    const q = "type=" + encodeURIComponent(t) + "&scope=" + encodeURIComponent(scope) +
+      "&name=" + encodeURIComponent(name) +
+      (file ? "&file=" + encodeURIComponent(file) : "");
+    EDITING = { item: true, ...(await api("/api/item?" + q)) };
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
 function renderEditor() {
   const el = document.getElementById("editorview");
   const f = EDITING;
   el.innerHTML =
     `<div class="sethead">editing <b>${esc(f.path)}</b>` +
-    ` (source: ${f.source === "claude" ? "shared" : esc(f.source)}${f.exists ? "" : ", new file"})</div>`;
+    (f.item
+      ? (f.exists ? "" : " (new file — created on save)")
+      : ` (source: ${f.source === "claude" ? "shared" : esc(f.source)}${f.exists ? "" : ", new file"})`) +
+    `</div>`;
+  if (f.item && f.files && f.files.length > 1) {
+    const tabs = document.createElement("div");
+    tabs.className = "ftabs";
+    for (const name of f.files) {
+      const b = document.createElement("button");
+      b.className = "small" + (name === f.file ? " on" : "");
+      b.textContent = name;
+      b.onclick = () => openItemEditor(f.scope, f.name, name, f.type);
+      tabs.appendChild(b);
+    }
+    el.appendChild(tabs);
+  }
   const ta = document.createElement("textarea");
   ta.id = "fileeditor";
   ta.rows = 24;
@@ -2714,10 +3329,18 @@ function renderEditor() {
 }
 
 async function saveFile() {
+  const content = document.getElementById("fileeditor").value;
   try {
-    await api("/api/file-save", { id: EDITING.id, content: document.getElementById("fileeditor").value });
+    if (EDITING.item) {
+      await api("/api/item-save", { type: EDITING.type, scope: EDITING.scope,
+        name: EDITING.name, file: EDITING.file, content });
+    } else {
+      await api("/api/file-save", { id: EDITING.id, content });
+    }
     toast(EDITING.path + " saved");
     EDITING.exists = true;
+    if (EDITING.item && EDITING.files && !EDITING.files.includes(EDITING.file))
+      EDITING.files.push(EDITING.file);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -2727,7 +3350,9 @@ function closeEditor() {
 }
 
 function render() {
+  closeMenu();
   renderLinks();
+  renderGit();
   renderTabs();
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
@@ -2754,6 +3379,9 @@ function render() {
     const items = data[scope].filter(
       (s) => !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q)
     );
+    items.sort(SORT === "recent"
+      ? (a, b) => (b.mtime || 0) - (a.mtime || 0)
+      : (a, b) => a.name.localeCompare(b.name));
     document.getElementById("n-" + scope).textContent = "· " + data[scope].length;
     const box = document.getElementById(scope);
     box.innerHTML = "";
@@ -2769,16 +3397,38 @@ function render() {
         (s.local ? '<span class="badge local">gitignored</span>' : "") +
         (s.symlink && !s.managed ? '<span class="badge link">symlink</span>' : "") +
         (s.broken ? '<span class="badge warn">broken</span>' : "") +
-        (s.incomplete && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "");
-      const move = s.movable ? `<button onclick="moveToGroup('${s.name}')">move</button>` : "";
-      const act =
-        scope === "active"
-          ? `<button onclick="doAct('archive','${s.name}')">archive</button>`
-          : `<button onclick="doAct('restore','${s.name}')">restore</button>`;
+        (s.incomplete && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "") +
+        (s.todo ? '<span class="badge warn" title="leftover TODO placeholder inside">TODO</span>' : "") +
+        (s.name_mismatch ? '<span class="badge warn" title="frontmatter name: does not match the folder name">name≠dir</span>' : "") +
+        (s.long_desc ? '<span class="badge warn" title="description over 1024 characters — may be truncated">long desc</span>' : "");
       row.innerHTML =
-        `<span class="name" title="${s.path || ""}">${esc(s.name)}</span>` + badges +
-        `<span class="desc">${esc(s.description || "")}</span>` +
-        `<span class="actions">${move}${act}<button class="danger" onclick="doDelete('${scope}','${s.name}',${s.managed})">delete</button></span>`;
+        `<span class="name" title="${esc(s.path || "")}">${esc(s.name)}</span>` + badges +
+        `<span class="desc">${esc(s.description || "")}</span>`;
+      const act = document.createElement("span");
+      act.className = "actions";
+      const btn = (label, fn, cls, title) => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        if (cls) b.className = cls;
+        if (title) b.title = title;
+        b.onclick = fn;
+        act.appendChild(b);
+      };
+      if (!s.broken) btn("edit", () => openItemEditor(scope, s.name));
+      const entries = [];
+      if (s.movable) {
+        entries.push({ label: "move…", fn: () => moveToGroup(s.name) });
+        entries.push({ label: "rename…", fn: () => renameItem(s.name) });
+        entries.push({ label: "duplicate…", fn: () => duplicateItem(s.name) });
+      }
+      entries.push(scope === "active"
+        ? { label: "archive", fn: () => doAct("archive", s.name) }
+        : { label: "restore", fn: () => doAct("restore", s.name) });
+      entries.push({ label: "delete…", danger: true,
+        fn: () => doDelete(scope, s.name, s.managed) });
+      btn("⋯", (e) => { e.stopPropagation(); openMenu(e.currentTarget, entries); },
+        null, "move, rename, duplicate, archive, delete");
+      row.appendChild(act);
       box.appendChild(row);
     }
   }
@@ -2802,22 +3452,54 @@ async function doAct(action, name) {
 
 async function moveToGroup(name) {
   const gs = (DATA.types[TAB] || {}).groups || [];
-  const g = prompt(
-    "Move into folder/collection — blank for top level" + (gs.length ? " (existing: " + gs.join(", ") + ")" : "") + ":", "");
-  if (g === null) return;
+  const fields = [{ id: "g", label: "into folder / collection", type: "select",
+    options: [{ value: "", label: "(top level)" },
+      ...gs.map((g) => ({ value: g, label: g + "/" }))] }];
+  if (TAB !== "skills")
+    fields.push({ id: "n", label: "…or a new folder",
+      placeholder: "leave empty to use the pick above" });
+  const r = await modal({ title: "move " + name, fields, ok: "move" });
+  if (r === null) return;
   try {
-    const r = await api("/api/move", { type: TAB, name, group: g.trim() });
-    toast(name + " → " + r.name);
+    const res = await api("/api/move", { type: TAB, name, group: r.n || r.g || "" });
+    toast(name + " → " + res.name);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function renameItem(name) {
+  const r = await modal({ title: "rename " + name,
+    text: TAB === "skills"
+      ? "a '<group>-' prefix files it into that group"
+      : "use folder/name to move it while renaming",
+    fields: [{ id: "n", label: "new name", value: name }], ok: "rename" });
+  if (!r || !r.n || r.n === name) return;
+  try {
+    const res = await api("/api/rename", { type: TAB, name, new_name: r.n });
+    toast(name + " → " + res.name);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function duplicateItem(name) {
+  const r = await modal({ title: "duplicate " + name,
+    fields: [{ id: "n", label: "copy's name", value: name + "-copy" }],
+    ok: "duplicate" });
+  if (!r || !r.n) return;
+  try {
+    const res = await api("/api/duplicate", { type: TAB, name, new_name: r.n });
+    toast(name + " copied to " + res.name);
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
 async function newGroup() {
-  const name = prompt("New folder name — 'work' stays out of git:");
-  if (!name) return;
+  const r = await modal({ title: "new folder", text: "'work' stays out of git",
+    fields: [{ id: "n", label: "name" }], ok: "create" });
+  if (!r || !r.n) return;
   try {
-    await api("/api/group", { type: TAB, name: name.trim() });
-    toast(name + "/ created — use move to file items into it");
+    await api("/api/group", { type: TAB, name: r.n });
+    toast(r.n + "/ created — use move to file items into it");
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -2832,9 +3514,9 @@ async function removeGroup(name) {
 
 async function doDelete(scope, name, managed) {
   const msg = managed
-    ? "Permanently delete " + name + " and its files inside its folder?"
-    : "Permanently delete " + name + "? (a symlink's target is untouched)";
-  if (!confirm(msg)) return;
+    ? "Permanently deletes " + name + " and the files inside its folder."
+    : "Permanently deletes " + name + ". (A symlink's target is untouched.)";
+  if (!(await mconfirm("delete " + name, msg, "delete"))) return;
   try {
     await api("/api/delete", { type: TAB, scope, name });
     toast(name + " deleted");
@@ -2844,13 +3526,14 @@ async function doDelete(scope, name, managed) {
 
 async function newItem() {
   const hint = TAB === "skills"
-    ? "Skill name (kebab-case; '<group>-' prefix files it in that group, work- stays out of git):"
-    : "Name (use folder/name for nesting; work/ stays out of git):";
-  const name = prompt(hint);
-  if (!name) return;
+    ? "kebab-case; a '<group>-' prefix files it in that group; 'work-' stays out of git"
+    : "use folder/name for nesting; work/ stays out of git";
+  const r = await modal({ title: "new " + TAB.replace(/s$/, ""), text: hint,
+    fields: [{ id: "n", label: "name" }], ok: "create" });
+  if (!r || !r.n) return;
   try {
-    const r = await api("/api/new", { type: TAB, name: name.trim() });
-    toast("created " + r.path);
+    const res = await api("/api/new", { type: TAB, name: r.n });
+    toast("created " + res.path);
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -2884,12 +3567,13 @@ async function uploadItems(ev) {
   const isCollection = rels.some((r) =>
     COLLECTION_MARKS.some((m) => r.startsWith(m)) || CONFIG_FILE_NAMES.includes(r));
   if (isCollection) {
-    const name = prompt(
-      "This folder looks like a whole Claude config (collection). Import as — 'work' stays out of git:", root);
-    if (!name) return;
+    const m = await modal({ title: "import collection",
+      text: "this folder looks like a whole Claude config — 'work' stays out of git",
+      fields: [{ id: "n", label: "import as", value: root }], ok: "import" });
+    if (!m || !m.n) return;
     try {
       const payload = await encodeFiles(files, true);
-      const r = await api("/api/upload-collection", { name: name.trim(), files: payload });
+      const r = await api("/api/upload-collection", { name: m.n, files: payload });
       toast("imported collection " + r.path + "/ — " +
         r.skills + " skills, " + r.commands + " commands, " + r.agents + " agents" +
         (r.config_files.length ? ", files: " + r.config_files.join(", ") : ""));
@@ -2897,13 +3581,15 @@ async function uploadItems(ev) {
     } catch (e) { toast(e.message, true); }
     return;
   }
-  const name = prompt(TAB === "skills"
-    ? "Import as (a folder of skills becomes a group):"
-    : "Import into folder (blank = top level):", TAB === "skills" ? root : "");
-  if (name === null) return;
+  const m = await modal({ title: "import " + TAB,
+    text: TAB === "skills" ? "a folder of skills becomes a group" : undefined,
+    fields: [{ id: "n",
+      label: TAB === "skills" ? "import as" : "into folder (blank = top level)",
+      value: TAB === "skills" ? root : "" }], ok: "import" });
+  if (m === null) return;
   try {
     const payload = await encodeFiles(files, true);
-    const r = await api("/api/upload", { type: TAB, name: name.trim(), files: payload });
+    const r = await api("/api/upload", { type: TAB, name: m.n, files: payload });
     toast(r.kind === "group"
       ? "imported " + r.path + "/ as a group — " + r.skills + " skill" + (r.skills === 1 ? "" : "s") + " linked"
       : "imported " + (r.path || TAB) + " (" + r.files + " files)");
@@ -2915,14 +3601,18 @@ async function uploadFiles(ev) {
   const files = [...ev.target.files];
   ev.target.value = "";
   if (!files.length) return;
-  const name = prompt(TAB === "skills"
-    ? "Add file(s) to skill — an existing name, or a new one (a lone .md becomes its SKILL.md):"
-    : "Into folder (blank = top level):", "");
-  if (name === null) return;
+  const m = await modal({ title: "add files",
+    text: TAB === "skills"
+      ? "an existing skill name, or a new one (a lone .md becomes its SKILL.md)"
+      : undefined,
+    fields: [{ id: "n",
+      label: TAB === "skills" ? "into skill" : "into folder (blank = top level)" }],
+    ok: "add" });
+  if (m === null) return;
   try {
     const payload = await encodeFiles(files, false);
     const ep = TAB === "skills" ? "/api/upload-files" : "/api/upload";
-    const r = await api(ep, { type: TAB, name: name.trim(), files: payload });
+    const r = await api(ep, { type: TAB, name: m.n, files: payload });
     toast(r.created
       ? "created " + r.path + " (" + r.files + " files)"
       : "added " + r.files + " file" + (r.files === 1 ? "" : "s") + " to " + (r.path || TAB));
@@ -2933,6 +3623,34 @@ async function uploadFiles(ev) {
 document.getElementById("up").addEventListener("change", uploadItems);
 document.getElementById("upf").addEventListener("change", uploadFiles);
 document.getElementById("q").addEventListener("input", render);
+document.getElementById("themebtn").addEventListener("click", toggleTheme);
+document.getElementById("sortsel").addEventListener("change", (e) => {
+  SORT = e.target.value;
+  render();
+});
+
+// Keyboard: "/" focuses the filter, Escape closes editor/menu, 1-9 switch tabs.
+document.addEventListener("keydown", (e) => {
+  if (!document.getElementById("modal").hidden) return;
+  const tag = e.target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
+  if (e.key === "/") {
+    if (EDITING || ["settings", "mcp", "statusline"].includes(TAB)) return;
+    e.preventDefault();
+    document.getElementById("q").focus();
+  } else if (e.key === "Escape") {
+    closeMenu();
+    if (EDITING) closeEditor();
+  } else if (e.key >= "1" && e.key <= "9" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    const tabs = [...Object.keys(DATA.types), "mcp", "statusline", "settings"];
+    const t = tabs[+e.key - 1];
+    if (t) { TAB = t; location.hash = t; render(); }
+  }
+});
+
 refresh();
 </script>
 """
@@ -2958,6 +3676,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/":
             self.send(200, PAGE.replace("__SCHEMA__", json.dumps(SETTINGS_SCHEMA)),
                       "text/html; charset=utf-8")
+        elif self.path == "/favicon.ico":
+            self.send(200, "<svg xmlns='http://www.w3.org/2000/svg' "
+                           "viewBox='0 0 16 16'><text y='13' font-size='13'>"
+                           "⚙️</text></svg>", "image/svg+xml")
         elif self.path == "/api/state":
             reconcile_links()
             types = {}
@@ -2983,6 +3705,7 @@ class Handler(BaseHTTPRequestHandler):
                 "settings": settings_state(),
                 "mcp": mcp_state(),
                 "statusline": statusline_state(),
+                "git": git_state(),
                 "collections": collections(),
                 "config_dir": str(config_dir()).replace(home, "~", 1),
                 "default_dir": "config_dir" not in read_cfg()
@@ -2993,6 +3716,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send(200, file_read((q.get("id") or [""])[0]))
             except ValueError as e:
+                self.send(400, {"error": str(e)})
+        elif self.path.startswith("/api/item?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            get = lambda k, d="": (q.get(k) or [d])[0]
+            try:
+                type_ = get("type")
+                if type_ not in TYPES:
+                    raise ValueError("unknown type")
+                scope = get("scope", "active")
+                if scope not in ("active", "archived"):
+                    raise ValueError("bad scope")
+                self.send(200, item_read(type_, scope, get("name"), get("file") or None))
+            except (ValueError, OSError) as e:
                 self.send(400, {"error": str(e)})
         else:
             self.send(404, {"error": "not found"})
@@ -3062,14 +3798,8 @@ class Handler(BaseHTTPRequestHandler):
             dest_g = (req.get("group") or "").strip()
             if dest_g and not NAME_RE.match(dest_g):
                 raise ValueError("bad group name")
-            entry = resolve_skill("active", name)
-            sm = split_managed(name)
-            if sm and entry.is_symlink() and (group_content_dir(sm[0]) / sm[1]).is_dir():
-                src, link, base = group_content_dir(sm[0]) / sm[1], entry, sm[1]
-            elif entry.is_dir() and not entry.is_symlink():
-                src, link, base = entry, None, name
-            else:
-                raise ValueError(f"{name}: only real skill dirs and group members can move")
+            src, link = movable_skill(name)
+            base = src.name
             if dest_g:
                 gmap = skill_groups_map()
                 if dest_g not in gmap:
@@ -3090,6 +3820,27 @@ class Handler(BaseHTTPRequestHandler):
                 link.unlink()
             reconcile_links()
             return {"ok": True, "name": new_name}
+        elif action in ("rename", "duplicate"):
+            new = (req.get("new_name") or "").strip()
+            if not NAME_RE.match(new):
+                raise ValueError("bad name")
+            if new == name:
+                raise ValueError("same name")
+            src, link = movable_skill(name)
+            dst = skill_creation_path(new)
+            taken = SKILLS / new
+            if dst.exists() or dst.is_symlink() or taken.exists() or taken.is_symlink():
+                raise ValueError(f"{new}: already exists")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if action == "rename":
+                src.rename(dst)
+                if link:
+                    link.unlink()
+            else:
+                shutil.copytree(src, dst)
+            update_skill_name(dst, new)
+            reconcile_links()
+            return {"ok": True, "name": new}
         elif action == "group":
             if not NAME_RE.match(name):
                 raise ValueError("bad group name")
@@ -3209,6 +3960,24 @@ class Handler(BaseHTTPRequestHandler):
             dst.parent.mkdir(parents=True, exist_ok=True)
             src.rename(dst)
             return {"ok": True, "name": new_name}
+        elif action in ("rename", "duplicate"):
+            new = (req.get("new_name") or "").strip()
+            src = md_path(type_, "active", name)
+            if not src.is_file():
+                raise ValueError(f"{name}: not found")
+            new = str(md_rel(new))
+            if new == name:
+                raise ValueError("same name")
+            ensure_md_collection(type_, new)
+            dst = md_path(type_, "active", new)
+            if dst.exists():
+                raise ValueError(f"{new}: already exists")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if action == "rename":
+                src.rename(dst)
+            else:
+                shutil.copy2(src, dst)
+            return {"ok": True, "name": new}
         elif action == "group":
             if name in collections():
                 ensure_md_collection(type_, name)
@@ -3305,6 +4074,26 @@ class Handler(BaseHTTPRequestHandler):
                 file_save(req.get("id", ""), req.get("content", ""))
                 self.send(200, {"ok": True})
                 return
+            if action == "item-save":
+                type_ = req.get("type", "")
+                if type_ not in TYPES:
+                    raise ValueError("unknown type")
+                scope = req.get("scope", "active")
+                if scope not in ("active", "archived"):
+                    raise ValueError("bad scope")
+                self.send(200, {"ok": True, **item_save(
+                    type_, scope, req.get("name", ""),
+                    req.get("file"), req.get("content", ""))})
+                return
+            if action == "git-diff":
+                self.send(200, {"ok": True, "diff": git_diff(req.get("path", ""))})
+                return
+            if action == "git-commit":
+                self.send(200, {"ok": True, "result": git_commit(req.get("message", ""))})
+                return
+            if action == "mcp-test":
+                self.send(200, mcp_test(req.get("name", "")))
+                return
             if action == "statusline-save":
                 statusline_save(req.get("config"), bool(req.get("apply")))
                 self.send(200, {"ok": True})
@@ -3353,8 +4142,9 @@ class Handler(BaseHTTPRequestHandler):
             type_ = req.get("type", "skills")
             if type_ not in TYPES:
                 raise ValueError("unknown type")
-            if action not in ("archive", "restore", "delete", "move",
-                             "group", "group-remove", "upload", "upload-files", "new"):
+            if action not in ("archive", "restore", "delete", "move", "rename",
+                             "duplicate", "group", "group-remove", "upload",
+                             "upload-files", "new"):
                 self.send(404, {"error": "not found"})
                 return
             if TYPES[type_]["kind"] == "dir":

@@ -1,6 +1,15 @@
 # claude-ui: improvement brainstorm
 
-Status: brainstorm — not triaged into issues yet.
+Status: first implementation pass landed (2026-07-19). Shipped: #1 in-place
+item editor, #2 git panel (status/diff/commit), #3 modals replacing all
+prompt()/confirm(), #4 rename+duplicate, #5 validation badges (TODO,
+name≠dir, long desc), #6 MCP test button + committed-secret warning,
+#9 links auto-collapse, #10 light theme, #11 toast stack w/ sticky errors,
+#12 responsive rows + overflow menu (no horizontal scroll at any width),
+#13 sort (a–z/recent), #14 keyboard nav (/, Esc, 1-9), #15 statusline
+preview width toggle (80/120 col), #27 escape-audit of row actions.
+Still open: #7 hooks builder, #8 cross-tab search, #16 markdown preview,
+#18 diff-anywhere, #19-26, #28 tests.
 
 Context: `bin/claude-ui` is a single-file, stdlib-only local web UI for managing
 Claude Code config (skills, commands, agents, output-styles, config files, MCP
