@@ -280,10 +280,31 @@ class Handler(BaseHTTPRequestHandler):
             gdir = resolve_skill("active", name)
             if not is_group(gdir):
                 raise ValueError(f"{name}: not a removable folder")
-            try:
-                gdir.rmdir()
-            except OSError:
-                raise ValueError(f"{name}: not empty") from None
+            mode = req.get("mode", "")
+            entries = [e for e in gdir.iterdir() if e.name != ".DS_Store"]
+            if entries and mode == "delete":
+                token = trash_put(gdir, "skills", "active", name)
+                reconcile_links()
+                return {"ok": True, "trash": token}
+            if entries and mode == "disband":
+                loose = [e.name for e in entries if not e.is_dir()]
+                if loose:
+                    raise ValueError(f"{name}: has loose files "
+                                     f"({', '.join(loose)}) — delete instead")
+                clashes = [e.name for e in entries
+                           if (SKILLS / e.name).exists()
+                           or (SKILLS / e.name).is_symlink()]
+                if clashes:
+                    raise ValueError(f"{', '.join(clashes)}: already exist "
+                                     "at top level")
+                for e in entries:
+                    e.rename(SKILLS / e.name)
+            elif entries:
+                raise ValueError(f"{name}: not empty")
+            for junk in gdir.iterdir():
+                junk.unlink()
+            gdir.rmdir()
+            reconcile_links()
         elif action == "upload":
             link = resolve_skill("active", name)
             path = skill_creation_path(name)
@@ -420,10 +441,24 @@ class Handler(BaseHTTPRequestHandler):
             gdir = root / md_rel(name)
             if not gdir.is_dir() or gdir.is_symlink():
                 raise ValueError(f"{name}: not a removable folder")
-            try:
-                gdir.rmdir()
-            except OSError:
-                raise ValueError(f"{name}: not empty") from None
+            mode = req.get("mode", "")
+            entries = [e for e in gdir.iterdir() if e.name != ".DS_Store"]
+            if entries and mode == "delete":
+                return {"ok": True,
+                        "trash": trash_put(gdir, type_, "active", name)}
+            if entries and mode == "disband":
+                clashes = [e.name for e in entries
+                           if (gdir.parent / e.name).exists()]
+                if clashes:
+                    raise ValueError(f"{', '.join(clashes)}: already exist "
+                                     f"outside {name}/")
+                for e in entries:
+                    e.rename(gdir.parent / e.name)
+            elif entries:
+                raise ValueError(f"{name}: not empty")
+            for junk in gdir.iterdir():
+                junk.unlink()
+            gdir.rmdir()
         elif action == "upload":
             ensure_md_collection(type_, name)
             base = root / md_rel(name) if name else root

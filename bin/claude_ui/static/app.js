@@ -1866,8 +1866,9 @@ function renderGroups() {
         ? ` <a href="/api/export?collection=${encodeURIComponent(g.name)}"` +
           ` style="color:var(--blue)" title="export collection as zip">⤓</a>`
         : "") +
-      (g.removable && !g.members && !g.loose_files
-        ? ` <a href="#" onclick="removeGroup('${g.name}');return false" title="remove empty folder">×</a>`
+      (g.removable
+        ? ` <a href="#" onclick="removeGroup('${g.name}');return false"` +
+          ` title="${g.members || g.loose_files ? "remove folder…" : "remove empty folder"}">×</a>`
         : "");
     el.appendChild(chip);
   }
@@ -2369,9 +2370,35 @@ async function newGroup() {
 }
 
 async function removeGroup(name) {
+  const gs = (DATA.types[TAB] || {}).group_info || [];
+  const g = gs.find((x) => x.name === name) || {};
+  const n = (g.members || 0) + (g.loose_files || 0);
+  let mode = "";
+  if (n) {
+    const r = await modal({ title: "remove " + name + "/",
+      text: "the folder still has " + n + " item" + (n === 1 ? "" : "s"),
+      fields: [{ id: "m", label: "what happens to the contents", type: "select",
+        options: [
+          { value: "disband", label: "move to top level, then remove the folder" },
+          { value: "delete", label: "delete folder and contents (to trash, undoable)" }] }],
+      ok: "remove", danger: true });
+    if (!r) return;
+    mode = r.m;
+  }
   try {
-    await api("/api/group-remove", { type: TAB, name });
-    toast(name + "/ removed");
+    const res = await api("/api/group-remove", { type: TAB, name, mode });
+    if (res && res.trash) {
+      toast(name + "/ deleted", false, { label: "undo", fn: async () => {
+        try {
+          await api("/api/undelete", { token: res.trash });
+          toast(name + "/ restored");
+          await refresh();
+        } catch (e) { toast(e.message, true); }
+      } });
+    } else {
+      toast(name + "/ removed" +
+        (mode === "disband" ? " — contents moved to top level" : ""));
+    }
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -2398,11 +2425,569 @@ async function doDelete(scope, name, managed) {
   } catch (e) { toast(e.message, true); }
 }
 
+// ---- skill wizard ----------------------------------------------------------
+// Step-by-step SKILL.md builder replacing the bare name prompt for skills.
+// It bakes in the skill-authoring guidance from the Claude Code docs: the
+// description is the only part Claude sees when deciding whether to use a
+// skill (so it must carry the "use when" triggers), the body should stay lean
+// because it sits in context for the rest of the session once invoked, and
+// bulky detail belongs in references/ files loaded on demand.
+
+const WIZ_KEY = "claude-ui-skill-wizard";
+const WIZ_STEPS = ["name", "description", "body", "extras", "review"];
+
+const WIZ_TPLS = {
+  workflow: { label: "workflow",
+    hint: "repeatable multi-step process — deploy, review, release",
+    body: (t) => "# " + t + "\n\nOne sentence on the goal and why it matters.\n\n" +
+      "## Steps\n\n1. First step — imperative and concrete.\n2. Next step.\n" +
+      "3. Verify: how to tell it worked.\n\n" +
+      "## Output\n\nDescribe exactly what the final output should look like.\n" },
+  reference: { label: "reference",
+    hint: "conventions or a style guide Claude should follow",
+    body: (t) => "# " + t + "\n\nConventions to follow whenever this topic comes up.\n\n" +
+      "## Rules\n\n- A rule — and the reason behind it (reasons beat bare MUSTs).\n\n" +
+      "## Examples\n\nGood: …\nBad: …\n" },
+  tool: { label: "tool wrapper",
+    hint: "wraps a script or CLI so Claude stops improvising",
+    body: (t) => "# " + t + "\n\nPrefer the command below over ad-hoc versions.\n\n" +
+      "## Usage\n\n```bash\n<command here>\n```\n\n" +
+      "## Notes\n\n- What to do when it fails.\n" },
+  blank: { label: "blank", hint: "start from nothing",
+    body: (t) => "# " + t + "\n\n" },
+};
+
+// Worked examples for the description step — each is a complete what/when/
+// phrases trio the user can adopt as a starting point.
+const WIZ_EXAMPLES = [
+  { label: "commit messages (workflow)",
+    what: "Writes a conventional-commit message from the staged diff",
+    when: "the user asks for a commit message, says \"commit this\", or wants staged changes summarized",
+    phrases: ["write a commit message", "commit this for me"] },
+  { label: "API conventions (reference)",
+    what: "Enforces this repo's REST conventions: plural-noun routes, cursor pagination, RFC 7807 errors",
+    when: "adding or reviewing an API endpoint, or writing an OpenAPI spec",
+    phrases: ["add an endpoint", "does this API look right"] },
+  { label: "app screenshots (tool wrapper)",
+    what: "Builds the app and captures simulator screenshots via scripts/snap.sh",
+    when: "the user wants to see the app, verify a UI change, or asks for a screenshot",
+    phrases: ["show me the app", "screenshot the login screen"] },
+];
+
+// Markdown sections the body step can append with one click.
+const WIZ_SNIPPETS = {
+  "steps": "## Steps\n\n1. First step — imperative and concrete.\n2. Next step.\n3. Verify: how to tell it worked.\n",
+  "output format": "## Output\n\nALWAYS produce exactly this shape:\n\n# <title>\n## Summary — two sentences max\n## Details\n",
+  "examples": "## Examples\n\n**Example 1:**\nInput: Added user authentication with JWT tokens\nOutput: feat(auth): implement JWT-based authentication\n",
+  "common mistakes": "## Common mistakes\n\n- The mistake — why it's wrong and what to do instead.\n",
+};
+
+const WIZ_TOOL_PRESETS = [
+  ["read-only", "Read Grep Glob"],
+  ["git", "Bash(git status *) Bash(git diff *) Bash(git log *)"],
+  ["gh pr", "Bash(gh pr view *) Bash(gh pr diff *)"],
+  ["web", "WebFetch WebSearch"],
+];
+const WIZ_REF_IDEAS = ["examples.md", "checklist.md", "api-reference.md", "troubleshooting.md"];
+const WIZ_ARG_IDEAS = ["[issue-number]", "[file] [format]", "[branch]"];
+
+const wizBlank = () => ({ step: 0, name: "", group: "", what: "", when: "",
+  phrases: [], tpl: "", body: "", touched: false, refs: [],
+  manual: false, hidden: false, tools: "", arghint: "" });
+
+function wizLoad() {
+  try {
+    const d = JSON.parse(localStorage.getItem(WIZ_KEY));
+    return d && typeof d === "object" ? { ...wizBlank(), ...d } : null;
+  } catch (e) { return null; }
+}
+const wizSave = (w) => { try { localStorage.setItem(WIZ_KEY, JSON.stringify(w)); } catch (e) {} };
+const wizClear = () => { try { localStorage.removeItem(WIZ_KEY); } catch (e) {} };
+
+const wizName = (w) => (w.group ? w.group + "-" : "") + w.name;
+
+function wizTaken(full) {
+  const t = DATA.types.skills || {};
+  return [...(t.active || []), ...(t.archived || [])].some((it) => it.name === full)
+    || (t.groups || []).includes(full);
+}
+
+// Compose the frontmatter description from its three ingredients. Keeping them
+// separate in the form (what / when / phrases) lets the UI lint each part.
+function wizDesc(w) {
+  let d = w.what.trim();
+  if (d && !/[.!?]$/.test(d)) d += ".";
+  const when = w.when.trim().replace(/^use (it |this )?when\s*/i, "");
+  if (when) d += (d ? " " : "") + "Use when " + when + (/[.!?]$/.test(when) ? "" : ".");
+  if (w.phrases.length)
+    d += " Trigger phrases: " + w.phrases.map((p) => '"' + p + '"').join(", ") + ".";
+  return d.trim();
+}
+
+function wizSkillMd(w) {
+  const q = (s) => '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  const fm = ["---", "name: " + wizName(w), "description: " + q(wizDesc(w) || "TODO")];
+  if (w.arghint) fm.push("argument-hint: " + w.arghint);
+  if (w.tools) fm.push("allowed-tools: " + w.tools);
+  if (w.manual) fm.push("disable-model-invocation: true");
+  if (w.hidden) fm.push("user-invocable: false");
+  fm.push("---", "");
+  let body = w.body.trim()
+    ? w.body.replace(/\s+$/, "") + "\n"
+    : WIZ_TPLS.blank.body(wizName(w) || "skill");
+  if (w.refs.length)
+    body += "\n## References\n\nLoaded on demand — read when the task needs the detail:\n\n" +
+      w.refs.map((r) => "- [references/" + r + "](references/" + r +
+        ") — TODO: say when to read this").join("\n") + "\n";
+  return fm.join("\n") + body;
+}
+
+function wizLint(w) {
+  const out = [];
+  const add = (level, msg) => out.push({ level, msg });
+  const full = wizName(w);
+  if (!w.name) add("bad", "needs a name");
+  else if (!/^[a-z0-9][a-z0-9-]*$/.test(w.name))
+    add("bad", "name should be kebab-case: lowercase letters, digits, dashes");
+  else if (wizTaken(full)) add("bad", full + " already exists");
+  else add("ok", "will be invoked as /" + full);
+  const desc = wizDesc(w);
+  if (!w.what.trim())
+    add("bad", "description is empty — it's the only thing Claude sees before deciding to use the skill");
+  else add("ok", "description present (" + desc.length + " chars)");
+  if (/(^|\s)(I|my|we|our)(\s|$)/.test(w.what))
+    add("warn", 'write the description in third person ("Reviews…", not "I review…")');
+  if (/\b(stuff|things|helps? with|various)\b/i.test(w.what))
+    add("warn", "vague wording — name the concrete task");
+  if (!w.when.trim())
+    add("warn", 'no "use when" triggers — skills without them tend to under-trigger');
+  if (!w.phrases.length)
+    add("warn", "no trigger phrases — a couple of realistic user phrasings improve matching");
+  if (desc.length > 1536)
+    add("bad", "description over the 1536-char cap — it will be truncated");
+  else if (desc.length > 600)
+    add("warn", "long description (" + desc.length + " chars) crowds the skill listing");
+  if (!w.body.trim()) add("warn", "body is empty — the skill will be a stub");
+  else if (/TODO/.test(w.body)) add("warn", "body still contains TODOs");
+  if (w.body.split("\n").length > 500)
+    add("warn", "body over the ~500-line guideline — move detail into references/ files");
+  if (w.manual && w.hidden)
+    add("bad", "manual-only + hidden from the / menu means nobody can invoke it");
+  return out;
+}
+
+function wizB64(s) {
+  const buf = new TextEncoder().encode(s);
+  let bin = "";
+  for (const b of buf) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function skillWizard() {
+  const m = document.getElementById("modal");
+  let w = wizLoad() || wizBlank();
+  let exOpen = false;
+  const hadDraft = !!(w.name || w.what || w.body);
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  };
+  const close = () => {
+    m.hidden = true;
+    m.innerHTML = "";
+    document.removeEventListener("keydown", onkey, true);
+  };
+  const onkey = (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); wizSave(w); close(); }
+  };
+  document.addEventListener("keydown", onkey, true);
+  m.onclick = (e) => { if (e.target === m) { wizSave(w); close(); } };
+  m.hidden = false;
+
+  const input = (value, ph, fn) => {
+    const i = document.createElement("input");
+    i.type = "text"; i.value = value;
+    if (ph) i.placeholder = ph;
+    i.oninput = () => { fn(i.value); wizSave(w); };
+    return i;
+  };
+  const area = (value, ph, rows, fn) => {
+    const a = document.createElement("textarea");
+    a.value = value; a.rows = rows;
+    if (ph) a.placeholder = ph;
+    a.oninput = () => { fn(a.value); wizSave(w); };
+    return a;
+  };
+  const row = (box, label, ctrl, why) => {
+    const r = el("div", "mrow");
+    if (label) r.appendChild(el("label", "", label));
+    r.appendChild(ctrl);
+    if (why) r.appendChild(el("div", "why", why));
+    box.appendChild(r);
+  };
+  const check = (box, val, label, why, fn) => {
+    const lab = el("label", "wcheck");
+    const c = document.createElement("input");
+    c.type = "checkbox"; c.checked = val;
+    c.onchange = () => { fn(c.checked); wizSave(w); render(); };
+    lab.appendChild(c);
+    lab.appendChild(document.createTextNode(" " + label));
+    const wrap = el("div", "mrow");
+    wrap.appendChild(lab);
+    if (why) wrap.appendChild(el("div", "why", why));
+    box.appendChild(wrap);
+  };
+  const chipList = (arr) => {
+    const c = el("div", "wchips");
+    arr.forEach((p, i) => {
+      const ch = el("span", "wchip", p);
+      const x = el("span", "x", "×");
+      x.onclick = () => { arr.splice(i, 1); wizSave(w); render(); };
+      ch.appendChild(x);
+      c.appendChild(ch);
+    });
+    return c;
+  };
+  const chipAdder = (ph, arr, normalize) => {
+    const wrap = el("div", "wadd");
+    const i = document.createElement("input");
+    i.type = "text"; i.placeholder = ph;
+    const push = () => {
+      let v = i.value.trim();
+      if (normalize) v = normalize(v);
+      if (v && !arr.includes(v)) { arr.push(v); wizSave(w); render(); }
+      else i.value = "";
+    };
+    i.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); push(); } };
+    const b = el("button", "small", "add");
+    b.onclick = push;
+    wrap.appendChild(i);
+    wrap.appendChild(b);
+    return wrap;
+  };
+
+  async function create() {
+    const files = [{ path: "SKILL.md", content: wizSkillMd(w) }];
+    for (const r of w.refs)
+      files.push({ path: "references/" + r, content: "# " + r.replace(/\.md$/, "") +
+        "\n\nTODO: detail that stays out of the always-loaded SKILL.md body.\n" });
+    try {
+      await api("/api/upload", { type: "skills", name: wizName(w),
+        files: files.map((f) => ({ path: f.path, content_b64: wizB64(f.content) })) });
+      wizClear();
+      close();
+      toast("created skills/" + wizName(w) +
+        (w.refs.length ? " (+" + w.refs.length + " reference stub" + (w.refs.length > 1 ? "s" : "") + ")" : ""));
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function render() {
+    m.innerHTML = "";
+    const box = el("div", "mbox wizbox");
+    const head = el("h3", "", "new skill — " + WIZ_STEPS[w.step]);
+    if (hadDraft && w.step === 0) {
+      const reset = el("button", "small", "start over");
+      reset.onclick = () => { w = wizBlank(); wizClear(); render(); };
+      head.appendChild(document.createTextNode(" "));
+      head.appendChild(reset);
+    }
+    box.appendChild(head);
+    const pills = el("div", "wsteps");
+    WIZ_STEPS.forEach((s, i) => {
+      const b = el("button", "small" + (i === w.step ? " on" : ""), (i + 1) + " " + s);
+      b.onclick = () => { w.step = i; wizSave(w); render(); };
+      pills.appendChild(b);
+    });
+    box.appendChild(pills);
+
+    if (w.step === 0) {
+      box.appendChild(el("div", "mtext",
+        "A guided SKILL.md in five short steps. Everything auto-saves as a draft — Escape closes without losing work."));
+      const note = el("div", "why");
+      const syncName = () => {
+        const full = wizName(w);
+        const taken = full && wizTaken(full);
+        note.textContent = !w.name
+          ? "kebab-case — the folder name becomes the /command"
+          : taken ? full + " already exists"
+          : "creates skills/" + full + "/SKILL.md — invoked as /" + full;
+        note.classList.toggle("warnc", !!taken);
+      };
+      const ni = input(w.name, "e.g. release-checklist", (v) => {
+        w.name = v.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+        if (ni.value !== w.name) ni.value = w.name;
+        syncName();
+      });
+      const r = el("div", "mrow");
+      r.appendChild(el("label", "", "name"));
+      r.appendChild(ni);
+      r.appendChild(note);
+      box.appendChild(r);
+      syncName();
+      const gs = (DATA.types.skills || {}).groups || [];
+      if (gs.length) {
+        const sel = document.createElement("select");
+        for (const o of [{ v: "", l: "(top level)" }, ...gs.map((g) => ({ v: g, l: g + "/" }))]) {
+          const op = document.createElement("option");
+          op.value = o.v; op.textContent = o.l;
+          if (o.v === w.group) op.selected = true;
+          sel.appendChild(op);
+        }
+        sel.onchange = () => { w.group = sel.value; wizSave(w); render(); };
+        row(box, "folder", sel, "files it as " + (w.group || "<folder>") + "-" + (w.name || "<name>") + "; work/ stays out of git");
+      }
+    }
+
+    if (w.step === 1) {
+      box.appendChild(el("div", "mtext",
+        "Claude decides whether to use a skill from the description alone — the body only loads after it triggers. Spell the triggers out."));
+      row(box, "what it does",
+        area(w.what, "Reviews a PR against the team checklist and flags anything risky", 2,
+          (v) => { w.what = v; sync(); }),
+        "third person, starts with a verb — one concrete sentence");
+      row(box, "use when…",
+        area(w.when, "the user asks to review a PR, mentions the checklist, or pastes a diff", 2,
+          (v) => { w.when = v; sync(); }),
+        "the situations that should trigger it — be a little pushy; skills under-trigger more than over-trigger");
+      const pr = el("div", "mrow");
+      pr.appendChild(el("label", "", "trigger phrases"));
+      pr.appendChild(chipList(w.phrases));
+      pr.appendChild(chipAdder("things a user would actually type — Enter to add", w.phrases));
+      pr.appendChild(el("div", "why", "realistic phrasings (casual, typos and all) help Claude match real asks"));
+      box.appendChild(pr);
+      const prev = el("div", "wprev");
+      const cnt = el("div", "wcount");
+      const sync = () => {
+        const d = wizDesc(w);
+        prev.textContent = d || "— composed description appears here —";
+        cnt.textContent = d.length + " chars" +
+          (d.length > 1536 ? " — over the 1536 cap, will be truncated"
+            : d.length > 600 ? " — getting long for the always-loaded listing" : "");
+        cnt.className = "wcount" + (d.length > 1536 ? " bad" : d.length > 600 ? " warn" : "");
+      };
+      sync();
+      row(box, "description (composed)", prev);
+      box.appendChild(cnt);
+      const ex = el("details", "wex");
+      ex.open = exOpen;
+      ex.ontoggle = () => { exOpen = ex.open; };
+      ex.appendChild(el("summary", "", "examples — good and bad"));
+      ex.appendChild(el("div", "why",
+        'too vague to ever trigger: "Helps with git stuff", "Does code review things". Good descriptions name the concrete task and the situations:'));
+      for (const e of WIZ_EXAMPLES) {
+        const r = el("div", "wexrow");
+        const use = el("button", "small", "use");
+        use.onclick = () => {
+          const skipped = (w.what.trim() && w.what !== e.what)
+            || (w.when.trim() && w.when !== e.when) || w.phrases.length > 0;
+          if (!w.what.trim()) w.what = e.what;
+          if (!w.when.trim()) w.when = e.when;
+          if (!w.phrases.length) w.phrases = [...e.phrases];
+          exOpen = true;
+          wizSave(w);
+          render();
+          if (skipped) toast("kept your text — only empty fields were filled");
+        };
+        r.appendChild(use);
+        const d = el("div");
+        d.appendChild(el("b", "", e.label));
+        d.appendChild(el("div", "why",
+          '"' + e.what + '. Use when ' + e.when + '."'));
+        r.appendChild(d);
+        ex.appendChild(r);
+      }
+      box.appendChild(ex);
+    }
+
+    if (w.step === 2) {
+      box.appendChild(el("div", "mtext",
+        "The body loads when the skill triggers and stays in context — keep it lean (under ~500 lines), imperative, and explain why, not just what."));
+      const tr = el("div", "wtpl");
+      for (const [k, t] of Object.entries(WIZ_TPLS)) {
+        const b = el("button", w.tpl === k ? "on" : "");
+        b.appendChild(el("b", "", t.label));
+        b.appendChild(el("span", "tdesc", t.hint));
+        b.onclick = () => {
+          if (w.touched && w.body.trim()) { toast("body already edited — template not applied", true); return; }
+          w.tpl = k;
+          w.body = t.body(wizName(w) || "skill");
+          w.touched = false;
+          wizSave(w);
+          render();
+        };
+        tr.appendChild(b);
+      }
+      box.appendChild(tr);
+      const lc = el("div", "wcount");
+      const syncLines = () => {
+        const n = w.body.trim() ? w.body.split("\n").length : 0;
+        lc.textContent = n + " line" + (n === 1 ? "" : "s") +
+          (n > 500 ? " — over the ~500 guideline; move detail to references/"
+            : " (guideline: under ~500)");
+        lc.className = "wcount" + (n > 500 ? " warn" : "");
+      };
+      row(box, "", area(w.body, "# instructions for Claude…", 13,
+        (v) => { w.body = v; w.touched = true; syncLines(); }));
+      syncLines();
+      box.appendChild(lc);
+      const snips = el("div", "wsnips");
+      snips.appendChild(el("span", "why", "insert section:"));
+      for (const [k, s] of Object.entries(WIZ_SNIPPETS)) {
+        const b = el("button", "small", "+ " + k);
+        b.onclick = () => {
+          w.body = w.body.trim() ? w.body.replace(/\s+$/, "") + "\n\n" + s : s;
+          w.touched = true;
+          wizSave(w);
+          render();
+        };
+        snips.appendChild(b);
+      }
+      box.appendChild(snips);
+    }
+
+    if (w.step === 3) {
+      box.appendChild(el("div", "mtext",
+        "All optional — skip straight to review if none of this applies."));
+      const rr = el("div", "mrow");
+      rr.appendChild(el("label", "", "reference files"));
+      rr.appendChild(chipList(w.refs));
+      rr.appendChild(chipAdder("e.g. api-details.md — Enter to add", w.refs,
+        (v) => v && (v.endsWith(".md") ? v : v + ".md")));
+      const ideas = WIZ_REF_IDEAS.filter((i) => !w.refs.includes(i));
+      if (ideas.length) {
+        const ir = el("div", "wsnips");
+        ir.appendChild(el("span", "why", "common ones:"));
+        for (const i of ideas) {
+          const b = el("button", "small", "+ " + i);
+          b.onclick = () => { w.refs.push(i); wizSave(w); render(); };
+          ir.appendChild(b);
+        }
+        rr.appendChild(ir);
+      }
+      rr.appendChild(el("div", "why",
+        "stubs created under references/ — loaded only when needed, so bulky detail here costs nothing per session"));
+      box.appendChild(rr);
+      check(box, w.manual, "manual-only (disable-model-invocation)",
+        "Claude never auto-invokes it — for workflows where you control the timing (deploy, send, commit)",
+        (v) => { w.manual = v; });
+      check(box, w.hidden, "hide from / menu (user-invocable: false)",
+        "only Claude can invoke it — for background knowledge that isn't a command",
+        (v) => { w.hidden = v; });
+      row(box, "allowed-tools",
+        input(w.tools, "Read Grep Bash(git add *)", (v) => { w.tools = v.trim(); }),
+        "pre-approves tools for the skill's turn — no permission prompts");
+      const tp = el("div", "wsnips");
+      tp.appendChild(el("span", "why", "presets:"));
+      for (const [label, preset] of WIZ_TOOL_PRESETS) {
+        const b = el("button", "small", "+ " + label);
+        b.onclick = () => {
+          if (!w.tools.includes(preset))
+            w.tools = (w.tools ? w.tools + " " : "") + preset;
+          wizSave(w);
+          render();
+        };
+        tp.appendChild(b);
+      }
+      box.appendChild(tp);
+      row(box, "argument-hint",
+        input(w.arghint, "[issue-number]", (v) => { w.arghint = v.trim(); }),
+        "shown in the / autocomplete next to the command");
+      const ap = el("div", "wsnips");
+      ap.appendChild(el("span", "why", "e.g.:"));
+      for (const i of WIZ_ARG_IDEAS) {
+        const b = el("button", "small", i);
+        b.onclick = () => { w.arghint = i; wizSave(w); render(); };
+        ap.appendChild(b);
+      }
+      box.appendChild(ap);
+    }
+
+    if (w.step === 4) {
+      const lint = wizLint(w);
+      const bad = lint.some((l) => l.level === "bad");
+      const ll = el("div", "wlint");
+      for (const l of lint) {
+        const r = el("div", "wlintrow " + l.level,
+          (l.level === "ok" ? "✓ " : l.level === "warn" ? "⚠ " : "✗ ") + l.msg);
+        ll.appendChild(r);
+      }
+      box.appendChild(ll);
+      const files = ["skills/" + (wizName(w) || "?") + "/SKILL.md",
+        ...w.refs.map((r) => "skills/" + (wizName(w) || "?") + "/references/" + r)];
+      const fr = el("div", "wfiles");
+      fr.appendChild(el("div", "why", "creates: " + files.join(", ")));
+      const cp = el("button", "small", "copy SKILL.md");
+      cp.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(wizSkillMd(w));
+          toast("SKILL.md copied");
+        } catch (e) { toast("copy failed: " + e.message, true); }
+      };
+      fr.appendChild(cp);
+      box.appendChild(fr);
+      const prev = el("pre", "wprev");
+      prev.textContent = wizSkillMd(w);
+      box.appendChild(prev);
+      const doc = el("a", "why", "full frontmatter reference → code.claude.com/docs/en/skills");
+      doc.href = "https://code.claude.com/docs/en/skills";
+      doc.target = "_blank";
+      box.appendChild(doc);
+      var createBtn = el("button", "primary", "create skill");
+      createBtn.disabled = bad;
+      createBtn.title = bad ? "fix the ✗ items first" : "";
+      createBtn.onclick = create;
+    }
+
+    const nav = el("div", "wnav");
+    if (w.step === 0) {
+      const quick = el("button", "small", "plain stub instead");
+      quick.onclick = () => { wizSave(w); close(); quickNewSkill(); };
+      nav.appendChild(quick);
+    }
+    nav.appendChild(el("span", "spring"));
+    const cancel = el("button", "", "close");
+    cancel.onclick = () => { wizSave(w); close(); };
+    nav.appendChild(cancel);
+    if (w.step > 0) {
+      const back = el("button", "", "back");
+      back.onclick = () => { w.step--; wizSave(w); render(); };
+      nav.appendChild(back);
+    }
+    if (w.step < WIZ_STEPS.length - 1) {
+      const next = el("button", "primary", "next");
+      next.onclick = () => { w.step++; wizSave(w); render(); };
+      nav.appendChild(next);
+    } else {
+      nav.appendChild(createBtn);
+    }
+    box.appendChild(nav);
+    m.appendChild(box);
+    const first = box.querySelector("input[type=text], textarea");
+    if (first) first.focus();
+  }
+
+  render();
+}
+
+async function quickNewSkill() {
+  const r = await modal({ title: "new skill",
+    text: "kebab-case; a '<group>-' prefix files it in that group; 'work-' stays out of git",
+    fields: [{ id: "n", label: "name" }], ok: "create" });
+  if (!r || !r.n) return;
+  try {
+    const res = await api("/api/new", { type: "skills", name: r.n });
+    toast("created " + res.path);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
 async function newItem() {
-  const hint = TAB === "skills"
-    ? "kebab-case; a '<group>-' prefix files it in that group; 'work-' stays out of git"
-    : "use folder/name for nesting; work/ stays out of git";
-  const r = await modal({ title: "new " + TAB.replace(/s$/, ""), text: hint,
+  if (TAB === "skills") return skillWizard();
+  const r = await modal({ title: "new " + TAB.replace(/s$/, ""),
+    text: "use folder/name for nesting; work/ stays out of git",
     fields: [{ id: "n", label: "name" }], ok: "create" });
   if (!r || !r.n) return;
   try {
