@@ -1,10 +1,57 @@
--- gitsigns for in-buffer git; anything bigger goes through lazygit (snacks).
+-- gitsigns for in-buffer git; diffview for multi-file branch review;
+-- anything bigger goes through lazygit (snacks).
 -- mini.diff is here solely for its overlay view (full diff rendered inside
 -- the buffer: deleted lines, word-level changes). gitsigns keeps owning
 -- signs, hunk operations, and navigation, so every overlapping mini.diff
 -- feature is turned off: mappings disabled, and the "number" view style so
 -- its always-on indicator lives in the number column, not the sign column.
+-- Keybind convention (matches gitsigns below): lowercase = working tree,
+-- uppercase = against main's merge-base (`git diff main...` semantics).
+local function default_branch()
+  for _, branch in ipairs({ "main", "master" }) do
+    vim.fn.systemlist({ "git", "rev-parse", "--verify", "--quiet", branch })
+    if vim.v.shell_error == 0 then
+      return branch
+    end
+  end
+  vim.notify("diffview: no main/master branch found", vim.log.levels.WARN)
+end
+
+local function diffview_toggle(range)
+  if require("diffview.lib").get_current_view() then
+    vim.cmd("DiffviewClose")
+  else
+    vim.cmd("DiffviewOpen " .. (range or ""))
+  end
+end
+
 return {
+  {
+    "sindrets/diffview.nvim",
+    cmd = { "DiffviewOpen", "DiffviewFileHistory", "DiffviewClose" },
+    keys = {
+      {
+        "<leader>gd",
+        function()
+          diffview_toggle()
+        end,
+        desc = "Diffview: working tree (toggle)",
+      },
+      {
+        "<leader>gD",
+        function()
+          local branch = default_branch()
+          if branch then
+            diffview_toggle(branch .. "...HEAD")
+          end
+        end,
+        desc = "Diffview: branch vs main (toggle)",
+      },
+      { "<leader>gf", "<cmd>DiffviewFileHistory %<cr>", desc = "File history (current file)" },
+      { "<leader>gF", "<cmd>DiffviewFileHistory<cr>", desc = "File history (repo)" },
+    },
+    opts = {},
+  },
   {
     "nvim-mini/mini.diff",
     event = { "BufReadPre", "BufNewFile" },
