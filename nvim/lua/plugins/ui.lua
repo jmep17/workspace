@@ -63,6 +63,7 @@ return {
         { "<leader>f", group = "find" },
         { "<leader>g", group = "git" },
         { "<leader>gh", group = "hunks" },
+        { "<leader>gp", group = "pull requests (octo)" },
         { "<leader>s", group = "search" },
         { "<leader>sn", group = "noice" },
         { "<leader>t", group = "test" },

@@ -49,7 +49,8 @@ lua/plugins/             one file per concern; lazy.nvim imports the dir
   dap.lua                nvim-dap + dap-ui: debugpy, js-debug
   snacks.lua             picker, notifier, indent, lazygit, + toggles
   oil.lua                file explorer (directory-as-buffer)
-  git.lua                gitsigns
+  git.lua                gitsigns, diffview, mini.diff
+  octo.lua               octo.nvim: GitHub PRs/issues (<leader>gp…, needs gh CLI)
   ui.lua                 lualine, which-key
   editor.lua             mini.surround, mini.pairs, leap
   ai.lua                 claudecode.nvim (no Copilot — deliberate)
