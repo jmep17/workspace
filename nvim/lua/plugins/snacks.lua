@@ -1,6 +1,6 @@
--- snacks.nvim: deliberately adopted for nine QoL modules (see ADR 0003).
--- explorer/dashboard/scroll are intentionally off — oil.nvim owns the
--- explorer slot, and the other two are eye candy we opted out of.
+-- snacks.nvim: deliberately adopted for its QoL modules (see ADR 0003).
+-- explorer now owns the explorer slot (ADR 0005 — replaced oil.nvim for
+-- path-yanking). dashboard/scroll stay off as eye candy we opted out of.
 return {
   "folke/snacks.nvim",
   priority = 1000,
@@ -15,13 +15,14 @@ return {
     quickfile = { enabled = true },
     statuscolumn = { enabled = true },
     words = { enabled = true },
+    explorer = { enabled = true }, -- also replaces netrw for `nvim <dir>`
     dashboard = { enabled = false },
-    explorer = { enabled = false },
     scroll = { enabled = false },
   },
   -- stylua: ignore
   keys = {
     -- find
+    { "<leader>e", function() Snacks.explorer() end, desc = "Explorer" },
     { "<leader><space>", function() Snacks.picker.smart() end, desc = "Smart find files" },
     { "<leader>ff", function() Snacks.picker.files() end, desc = "Find files" },
     { "<leader>fb", function() Snacks.picker.buffers() end, desc = "Buffers" },
