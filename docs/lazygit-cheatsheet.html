@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lazygit Cheatsheet</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --surface: #ffffff;
+    --text: #1f2430;
+    --muted: #5c6470;
+    --accent: #2f6feb;
+    --accent-soft: #e8f0fe;
+    --border: #e2e5ea;
+    --kbd-bg: #eef1f5;
+    --kbd-border: #c9cfd8;
+    --highlight-bg: #fff8e6;
+    --highlight-border: #e6c34a;
+    --code-bg: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c;
+      --surface: #1c2027;
+      --text: #e4e7ec;
+      --muted: #9aa3b0;
+      --accent: #6ca0f6;
+      --accent-soft: #22304a;
+      --border: #2c313a;
+      --kbd-bg: #262b34;
+      --kbd-border: #414855;
+      --highlight-bg: #2e2913;
+      --highlight-border: #8a7327;
+      --code-bg: #262b34;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  header { margin-bottom: 1.5rem; }
+  h1 { font-size: 1.9rem; margin: 0 0 .35rem; }
+  .subtitle { color: var(--muted); margin: 0; }
+  nav.toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: .9rem 1.1rem;
+    margin: 1.25rem 0 2rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem .9rem;
+    font-size: .92rem;
+  }
+  nav.toc a { color: var(--accent); text-decoration: none; white-space: nowrap; }
+  nav.toc a:hover { text-decoration: underline; }
+  section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.35rem 1.35rem;
+    margin-bottom: 1.5rem;
+  }
+  h2 {
+    font-size: 1.25rem;
+    margin: 0 0 .3rem;
+    padding-bottom: .4rem;
+    border-bottom: 2px solid var(--accent-soft);
+  }
+  h3 { font-size: 1.02rem; margin: 1.2rem 0 .4rem; }
+  .panel-key {
+    display: inline-block;
+    font-size: .75rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 6px;
+    padding: .1rem .5rem;
+    vertical-align: middle;
+    margin-left: .4rem;
+  }
+  p.note { color: var(--muted); font-size: .92rem; margin: .3rem 0 .8rem; }
+  .table-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: .5rem 0 .25rem; font-size: .95rem; }
+  th, td { text-align: left; padding: .42rem .7rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  td.keys { white-space: nowrap; width: 1%; }
+  kbd {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .82rem;
+    background: var(--kbd-bg);
+    border: 1px solid var(--kbd-border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: .06rem .4rem;
+    margin: 0 .05rem;
+  }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .88em;
+    background: var(--code-bg);
+    border-radius: 5px;
+    padding: .1rem .35rem;
+  }
+  ol.steps { padding-left: 1.3rem; margin: .6rem 0; }
+  ol.steps li { margin-bottom: .55rem; }
+  ul { margin: .4rem 0 .6rem; padding-left: 1.3rem; }
+  li { margin-bottom: .3rem; }
+  .callout {
+    background: var(--highlight-bg);
+    border: 1px solid var(--highlight-border);
+    border-radius: 8px;
+    padding: .7rem .95rem;
+    font-size: .93rem;
+    margin: .9rem 0 .2rem;
+  }
+  .featured { border: 2px solid var(--accent); }
+  .featured h2 { border-bottom-color: var(--accent); }
+  footer { color: var(--muted); font-size: .88rem; text-align: center; margin-top: 2rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Lazygit Cheatsheet</h1>
+  <p class="subtitle">Default keybindings (lazygit ≥ 0.40). Press <kbd>?</kbd> inside lazygit for the authoritative, context-aware list — bindings change per panel. <kbd>esc</kbd> backs out of almost anything; <kbd>z</kbd> undoes almost anything.</p>
+</header>
+
+<nav class="toc">
+  <a href="#launching">Launching</a>
+  <a href="#navigation">Navigation</a>
+  <a href="#global">Global</a>
+  <a href="#status">Status</a>
+  <a href="#files">Files &amp; staging</a>
+  <a href="#branches">Branches</a>
+  <a href="#commits">Commits &amp; rebase</a>
+  <a href="#cherry-pick">Cherry-pick</a>
+  <a href="#patches">Custom patches</a>
+  <a href="#undo-lines">Undo lines from a past commit</a>
+  <a href="#stash">Stash</a>
+  <a href="#conflicts">Merge conflicts</a>
+  <a href="#workflows">Handy workflows</a>
+</nav>
+
+<section id="launching">
+  <h2>Launching</h2>
+  <div class="table-scroll"><table>
+    <tr><th>Command</th><th>What it does</th></tr>
+    <tr><td class="keys"><code>lazygit</code></td><td>Open in the current repo</td></tr>
+    <tr><td class="keys"><code>lazygit -p &lt;path&gt;</code></td><td>Open a specific repo</td></tr>
+    <tr><td class="keys"><code>lazygit log</code> / <code>status</code> / <code>branch</code> / <code>stash</code></td><td>Jump straight to a panel</td></tr>
+    <tr><td class="keys"><code>lazygit -f &lt;path&gt;</code></td><td>Filter commits by file path</td></tr>
+  </table></div>
+  <p class="note">In this setup lazygit is also wired into nvim via snacks (<code>nvim/lua/plugins/git.lua</code>).</p>
+</section>
+
+<section id="navigation">
+  <h2>Navigation (everywhere)</h2>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>1</kbd>–<kbd>5</kbd></td><td>Jump to panel: status, files, branches, commits, stash</td></tr>
+    <tr><td class="keys"><kbd>h</kbd> / <kbd>l</kbd> (or <kbd>←</kbd> / <kbd>→</kbd>)</td><td>Previous / next panel</td></tr>
+    <tr><td class="keys"><kbd>j</kbd> / <kbd>k</kbd></td><td>Move selection down / up</td></tr>
+    <tr><td class="keys"><kbd>[</kbd> / <kbd>]</kbd></td><td>Previous / next tab within a panel (e.g. Branches ↔ Remotes ↔ Tags)</td></tr>
+    <tr><td class="keys"><kbd>enter</kbd></td><td>Drill into the selected item</td></tr>
+    <tr><td class="keys"><kbd>esc</kbd></td><td>Back out / cancel</td></tr>
+    <tr><td class="keys"><kbd>/</kbd></td><td>Search the current panel</td></tr>
+    <tr><td class="keys"><kbd>ctrl+u</kbd> / <kbd>ctrl+d</kbd>, <kbd>pgup</kbd> / <kbd>pgdn</kbd></td><td>Scroll the main (diff) view</td></tr>
+    <tr><td class="keys"><kbd>+</kbd> / <kbd>_</kbd></td><td>Cycle screen mode (normal → half → fullscreen)</td></tr>
+    <tr><td class="keys"><kbd>q</kbd></td><td>Quit</td></tr>
+  </table></div>
+</section>
+
+<section id="global">
+  <h2>Global</h2>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>?</kbd></td><td>Open keybindings menu for the current panel</td></tr>
+    <tr><td class="keys"><kbd>p</kbd></td><td>Pull</td></tr>
+    <tr><td class="keys"><kbd>P</kbd></td><td>Push (<code>--force-with-lease</code> prompt if branches diverged)</td></tr>
+    <tr><td class="keys"><kbd>z</kbd></td><td>Undo (via reflog)</td></tr>
+    <tr><td class="keys"><kbd>ctrl+z</kbd></td><td>Redo</td></tr>
+    <tr><td class="keys"><kbd>R</kbd></td><td>Refresh</td></tr>
+    <tr><td class="keys"><kbd>x</kbd></td><td>Options menu</td></tr>
+    <tr><td class="keys"><kbd>:</kbd></td><td>Execute a custom shell command</td></tr>
+    <tr><td class="keys"><kbd>@</kbd></td><td>Command log menu (see the actual git commands lazygit ran)</td></tr>
+    <tr><td class="keys"><kbd>W</kbd> (or <kbd>ctrl+e</kbd>)</td><td>Diffing menu — diff any two refs</td></tr>
+    <tr><td class="keys"><kbd>ctrl+s</kbd></td><td>Filter view (e.g. filter commits by path/author)</td></tr>
+    <tr><td class="keys"><kbd>v</kbd></td><td>Toggle range select (then <kbd>j</kbd>/<kbd>k</kbd> to extend; works on lines, commits, files)</td></tr>
+    <tr><td class="keys"><kbd>y</kbd></td><td>Copy-to-clipboard menu for the selected item (SHA, file name, …)</td></tr>
+  </table></div>
+</section>
+
+<section id="status">
+  <h2>Status panel <span class="panel-key">1</span></h2>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>e</kbd> / <kbd>o</kbd></td><td>Edit / open lazygit config</td></tr>
+    <tr><td class="keys"><kbd>u</kbd></td><td>Check for updates</td></tr>
+    <tr><td class="keys"><kbd>enter</kbd></td><td>Switch to a recent repo</td></tr>
+    <tr><td class="keys"><kbd>a</kbd></td><td>Show all-branches log graph</td></tr>
+  </table></div>
+</section>
+
+<section id="files">
+  <h2>Files panel <span class="panel-key">2</span> — staging &amp; committing</h2>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>space</kbd></td><td>Stage / unstage selected file</td></tr>
+    <tr><td class="keys"><kbd>a</kbd></td><td>Stage / unstage everything</td></tr>
+    <tr><td class="keys"><kbd>enter</kbd></td><td>Enter the file to stage individual hunks/lines (see below)</td></tr>
+    <tr><td class="keys"><kbd>c</kbd></td><td>Commit staged changes</td></tr>
+    <tr><td class="keys"><kbd>w</kbd></td><td>Commit skipping pre-commit hooks</td></tr>
+    <tr><td class="keys"><kbd>C</kbd></td><td>Commit using the git editor</td></tr>
+    <tr><td class="keys"><kbd>A</kbd></td><td>Amend last commit with staged changes</td></tr>
+    <tr><td class="keys"><kbd>ctrl+f</kbd></td><td>Find base commit for a fixup (auto-picks which commit your changes belong to)</td></tr>
+    <tr><td class="keys"><kbd>d</kbd></td><td>Discard changes to file (menu)</td></tr>
+    <tr><td class="keys"><kbd>D</kbd></td><td>Reset menu (soft/mixed/hard, nuke working tree, discard untracked)</td></tr>
+    <tr><td class="keys"><kbd>s</kbd></td><td>Stash all changes</td></tr>
+    <tr><td class="keys"><kbd>S</kbd></td><td>Stash options (include untracked, staged-only, …)</td></tr>
+    <tr><td class="keys"><kbd>i</kbd></td><td>Add to .gitignore</td></tr>
+    <tr><td class="keys"><kbd>f</kbd></td><td>Fetch</td></tr>
+    <tr><td class="keys"><kbd>M</kbd></td><td>Open external merge tool</td></tr>
+    <tr><td class="keys"><kbd>ctrl+b</kbd></td><td>Filter files by status</td></tr>
+    <tr><td class="keys"><kbd>`</kbd></td><td>Toggle file tree view</td></tr>
+    <tr><td class="keys"><kbd>-</kbd> / <kbd>=</kbd></td><td>Collapse / expand all tree nodes</td></tr>
+  </table></div>
+
+  <h3>Inside a file (staging panel) — patching the index</h3>
+  <p class="note"><kbd>enter</kbd> on a file opens its diff so you can stage <em>parts</em> of it:</p>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>space</kbd></td><td>Stage / unstage the selected line(s)</td></tr>
+    <tr><td class="keys"><kbd>v</kbd></td><td>Start range select, extend with <kbd>j</kbd>/<kbd>k</kbd>, then <kbd>space</kbd></td></tr>
+    <tr><td class="keys"><kbd>a</kbd></td><td>Select / stage the whole current hunk</td></tr>
+    <tr><td class="keys"><kbd>←</kbd> / <kbd>→</kbd></td><td>Jump between hunks</td></tr>
+    <tr><td class="keys"><kbd>tab</kbd></td><td>Switch between unstaged and staged view (in staged view, <kbd>space</kbd> unstages)</td></tr>
+    <tr><td class="keys"><kbd>e</kbd></td><td>Edit the hunk in your editor (like <code>git add -e</code>)</td></tr>
+    <tr><td class="keys"><kbd>c</kbd></td><td>Commit right from here</td></tr>
+    <tr><td class="keys"><kbd>esc</kbd></td><td>Back to the files panel</td></tr>
+  </table></div>
+</section>
+
+<section id="branches">
+  <h2>Branches panel <span class="panel-key">3</span></h2>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>space</kbd></td><td>Checkout selected branch</td></tr>
+    <tr><td class="keys"><kbd>n</kbd></td><td>New branch off the selected branch</td></tr>
+    <tr><td class="keys"><kbd>c</kbd></td><td>Checkout by name (type a ref)</td></tr>
+    <tr><td class="keys"><kbd>-</kbd></td><td>Checkout previous branch</td></tr>
+    <tr><td class="keys"><kbd>F</kbd></td><td>Force checkout (discards local changes)</td></tr>
+    <tr><td class="keys"><kbd>d</kbd></td><td>Delete branch (menu: local / remote)</td></tr>
+    <tr><td class="keys"><kbd>M</kbd></td><td>Merge selected branch into current</td></tr>
+    <tr><td class="keys"><kbd>r</kbd></td><td>Rebase current branch onto selected</td></tr>
+    <tr><td class="keys"><kbd>R</kbd></td><td>Rename branch</td></tr>
+    <tr><td class="keys"><kbd>f</kbd></td><td>Fast-forward selected branch from its upstream</td></tr>
+    <tr><td class="keys"><kbd>u</kbd></td><td>Upstream options (set / unset / view)</td></tr>
+    <tr><td class="keys"><kbd>g</kbd></td><td>Reset menu (reset current branch to selected)</td></tr>
+    <tr><td class="keys"><kbd>T</kbd></td><td>Create tag</td></tr>
+    <tr><td class="keys"><kbd>o</kbd></td><td>Create pull request</td></tr>
+    <tr><td class="keys"><kbd>G</kbd></td><td>Open pull request in browser</td></tr>
+    <tr><td class="keys"><kbd>s</kbd></td><td>Change sort order</td></tr>
+    <tr><td class="keys"><kbd>enter</kbd></td><td>View the branch's commits</td></tr>
+  </table></div>
+  <p class="note">Tabs in this window: <strong>Local branches / Remotes / Tags / Worktrees</strong> (<kbd>[</kbd> / <kbd>]</kbd>).</p>
+</section>
+
+<section id="commits">
+  <h2>Commits panel <span class="panel-key">4</span> — rewriting history</h2>
+  <p class="note">These shorthands run a one-step interactive rebase behind the scenes:</p>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>s</kbd></td><td>Squash into the commit below</td></tr>
+    <tr><td class="keys"><kbd>f</kbd></td><td>Fixup into the commit below (discard this message)</td></tr>
+    <tr><td class="keys"><kbd>r</kbd></td><td>Reword commit</td></tr>
+    <tr><td class="keys"><kbd>R</kbd></td><td>Reword with editor</td></tr>
+    <tr><td class="keys"><kbd>d</kbd></td><td>Drop (delete) commit</td></tr>
+    <tr><td class="keys"><kbd>e</kbd></td><td>Edit — stop the rebase at this commit</td></tr>
+    <tr><td class="keys"><kbd>i</kbd></td><td>Start interactive rebase here (edit the todo list in-app, then <kbd>m</kbd> → continue)</td></tr>
+    <tr><td class="keys"><kbd>ctrl+j</kbd> / <kbd>ctrl+k</kbd></td><td>Move commit down / up</td></tr>
+    <tr><td class="keys"><kbd>A</kbd></td><td>Amend commit with currently staged changes</td></tr>
+    <tr><td class="keys"><kbd>a</kbd></td><td>Amend commit attribute (reset author, add co-author)</td></tr>
+    <tr><td class="keys"><kbd>F</kbd></td><td>Create a <code>fixup!</code> commit for the selected commit</td></tr>
+    <tr><td class="keys"><kbd>S</kbd></td><td>Apply all <code>fixup!</code> commits above (squash them in, like <code>--autosquash</code>)</td></tr>
+    <tr><td class="keys"><kbd>t</kbd></td><td>Revert commit</td></tr>
+    <tr><td class="keys"><kbd>T</kbd></td><td>Tag commit</td></tr>
+    <tr><td class="keys"><kbd>g</kbd></td><td>Reset menu — soft / mixed / hard reset to this commit</td></tr>
+    <tr><td class="keys"><kbd>space</kbd></td><td>Checkout commit (detached HEAD)</td></tr>
+    <tr><td class="keys"><kbd>B</kbd></td><td>Mark commit as base for rebase ("rebase from here onto…")</td></tr>
+    <tr><td class="keys"><kbd>C</kbd></td><td>Copy commit (cherry-pick) — see below</td></tr>
+    <tr><td class="keys"><kbd>V</kbd></td><td>Paste copied commits (cherry-pick onto current branch)</td></tr>
+    <tr><td class="keys"><kbd>enter</kbd></td><td>View the commit's files (entry point for custom patches)</td></tr>
+    <tr><td class="keys"><kbd>y</kbd></td><td>Copy SHA / message / URL to clipboard</td></tr>
+  </table></div>
+  <p class="note">During a conflicted rebase/merge: <kbd>m</kbd> opens the rebase options (continue, abort, skip).</p>
+</section>
+
+<section id="cherry-pick">
+  <h2>Cherry-picking</h2>
+  <ol class="steps">
+    <li>In any commits view (including another branch's, via Branches → <kbd>enter</kbd>), press <kbd>C</kbd> on each commit to copy it (range-select with <kbd>v</kbd> works too).</li>
+    <li>Checkout the target branch.</li>
+    <li>In its commits panel press <kbd>V</kbd> to paste. <kbd>esc</kbd> clears the copied set.</li>
+  </ol>
+</section>
+
+<section id="patches">
+  <h2>Custom patches — "how to patch"</h2>
+  <p class="note">Pull specific files or lines <em>out of an existing commit</em> (split a commit, move code between commits, extract to index):</p>
+  <ol class="steps">
+    <li><strong>Commits panel</strong> → <kbd>enter</kbd> on the commit to see its files.</li>
+    <li>Build the patch:
+      <ul>
+        <li><kbd>space</kbd> on a file → toggle the whole file into the patch (green = whole file, yellow = partial), or</li>
+        <li><kbd>enter</kbd> on a file → select lines (<kbd>v</kbd> for ranges, <kbd>a</kbd> for hunks) and <kbd>space</kbd> to toggle them into the patch.</li>
+      </ul>
+    </li>
+    <li>Press <kbd>ctrl+p</kbd> to open the <strong>custom patch options</strong> menu:
+      <ul>
+        <li><strong>Remove patch from commit</strong> — deletes those changes from the commit (they vanish entirely)</li>
+        <li><strong>Move patch out into index</strong> — pulls the changes out of the commit and leaves them staged</li>
+        <li><strong>Move patch into new commit</strong> — splits the commit, placing the patch in a new commit after it</li>
+        <li><strong>Move patch to selected commit</strong> — select another commit first, then move the changes into it</li>
+        <li><strong>Apply patch</strong> / <strong>apply in reverse</strong> — apply to the working tree</li>
+        <li><strong>Copy patch to clipboard</strong></li>
+      </ul>
+    </li>
+  </ol>
+  <p class="note">If a step causes conflicts, resolve them (see below) and continue with <kbd>m</kbd>. <kbd>ctrl+p</kbd> also shows "reset patch" to start over.</p>
+</section>
+
+<section id="undo-lines" class="featured">
+  <h2>Undo only some lines in a file from a previous commit</h2>
+  <p class="note">You committed a file a few commits ago, and some of those lines were a mistake — but the rest of the commit is fine. This uses the custom patch builder to surgically pull just those lines back out.</p>
+  <ol class="steps">
+    <li>Go to the <strong>commits panel</strong> (<kbd>4</kbd>) and select the commit that introduced the bad lines. (Tip: <kbd>ctrl+s</kbd> → filter by path, or <code>lazygit -f &lt;file&gt;</code>, helps find which commit touched the file.)</li>
+    <li>Press <kbd>enter</kbd> to see the commit's files, select the file, and press <kbd>enter</kbd> again to view its diff.</li>
+    <li>Select only the lines you want to undo: move with <kbd>j</kbd>/<kbd>k</kbd>, press <kbd>v</kbd> to start a range selection, then press <kbd>space</kbd> to add the selected lines to the custom patch. (<kbd>a</kbd> grabs a whole hunk; <kbd>space</kbd> again toggles lines back out; <kbd>d</kbd> removes lines from the patch.)</li>
+    <li>Press <kbd>esc</kbd> to step back, then press <kbd>ctrl+p</kbd> to open the custom patch options. Pick one:
+      <ul>
+        <li><strong>Remove patch from commit</strong> — the lines are undone as if never committed. History is rewritten; the rest of the commit stays intact.</li>
+        <li><strong>Move patch out into index</strong> — the lines leave the commit but land as staged changes, so you can inspect, tweak, or drop them yourself.</li>
+        <li><strong>Apply patch in reverse</strong> — reverts those lines in your <em>working tree only</em>, without rewriting the commit. Use this if the branch is already shared/pushed and you'd rather commit a small revert.</li>
+      </ul>
+    </li>
+    <li>If later commits also touched those lines you'll get conflicts — resolve them in the conflicts view, then continue with <kbd>m</kbd>.</li>
+  </ol>
+  <div class="callout">⚠️ The first two options rewrite history (an interactive rebase under the hood), so you'll need a force-push (<kbd>P</kbd>, lazygit offers <code>--force-with-lease</code>) if the commit was already pushed. Avoid on shared branches — use <strong>apply in reverse</strong> or <kbd>t</kbd> (revert) instead. And if it goes sideways: <kbd>z</kbd> undoes it.</div>
+</section>
+
+<section id="stash">
+  <h2>Stash panel <span class="panel-key">5</span></h2>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>space</kbd></td><td>Apply stash (keep it)</td></tr>
+    <tr><td class="keys"><kbd>g</kbd></td><td>Pop stash (apply + drop)</td></tr>
+    <tr><td class="keys"><kbd>d</kbd></td><td>Drop stash</td></tr>
+    <tr><td class="keys"><kbd>n</kbd></td><td>New branch from stash</td></tr>
+    <tr><td class="keys"><kbd>r</kbd></td><td>Rename stash</td></tr>
+    <tr><td class="keys"><kbd>enter</kbd></td><td>View stash files</td></tr>
+  </table></div>
+  <p class="note">Creating stashes happens from the <strong>files</strong> panel (<kbd>s</kbd> / <kbd>S</kbd>).</p>
+</section>
+
+<section id="conflicts">
+  <h2>Merge conflicts</h2>
+  <p class="note">Conflicted files show up in the files panel; <kbd>enter</kbd> opens conflict resolution:</p>
+  <div class="table-scroll"><table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td class="keys"><kbd>←</kbd> / <kbd>→</kbd></td><td>Jump between conflicts</td></tr>
+    <tr><td class="keys"><kbd>space</kbd></td><td>Pick the selected hunk</td></tr>
+    <tr><td class="keys"><kbd>b</kbd></td><td>Pick both hunks</td></tr>
+    <tr><td class="keys"><kbd>z</kbd></td><td>Undo pick</td></tr>
+    <tr><td class="keys"><kbd>e</kbd></td><td>Edit file directly</td></tr>
+    <tr><td class="keys"><kbd>M</kbd></td><td>Open external merge tool</td></tr>
+    <tr><td class="keys"><kbd>m</kbd></td><td>Continue / abort the merge or rebase (once all conflicts resolved)</td></tr>
+  </table></div>
+</section>
+
+<section id="workflows">
+  <h2>Handy workflows</h2>
+  <ul>
+    <li><strong>Amend an old commit</strong>: stage the changes (files panel) → commits panel → select the commit → <kbd>A</kbd>. Or <kbd>ctrl+f</kbd> in the files panel to auto-find the target and create a fixup.</li>
+    <li><strong>Split the last commit</strong>: commits panel → <kbd>g</kbd> → soft reset to the commit before → restage and commit in pieces.</li>
+    <li><strong>Undo a bad rebase</strong>: <kbd>z</kbd> (repeatedly) — it walks the reflog.</li>
+    <li><strong>See what git commands lazygit runs</strong>: <kbd>@</kbd> → toggle command log; great for learning the underlying git.</li>
+    <li><strong>Diff two branches</strong>: <kbd>W</kbd> on the first ref → move to the second → <kbd>W</kbd> → view diff; <kbd>esc</kbd> exits diff mode.</li>
+    <li><strong>Bisect</strong>: commits panel → <kbd>b</kbd> on a bad commit → mark good/bad as it steps.</li>
+  </ul>
+</section>
+
+<footer>Defaults verified against lazygit's <code>pkg/config/user_config.go</code>. Your own config lives at the path shown by <kbd>e</kbd> in the status panel.</footer>
+
+</div>
+</body>
+</html>
