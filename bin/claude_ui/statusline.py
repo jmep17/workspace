@@ -153,7 +153,8 @@ def refresh_costs():
         t = w = m = 0.0
         for r in json.loads(out).get("daily") or []:
             try:
-                day = datetime.date.fromisoformat(r.get("period", ""))
+                # "date" up to ccusage v17, renamed to "period" in later releases
+                day = datetime.date.fromisoformat(r.get("period") or r.get("date") or "")
                 c = float(r.get("totalCost") or 0)
             except (ValueError, TypeError):
                 continue
