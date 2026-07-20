@@ -49,6 +49,19 @@ return {
           vim.keymap.set(mode, l, r, { buffer = buffer, desc = desc })
         end
 
+        -- Merge-base against the default branch, so branch-vs-main diffs
+        -- ignore commits that landed on main after the branch point
+        -- (the `git diff main...` semantics).
+        local function merge_base()
+          for _, branch in ipairs({ "main", "master" }) do
+            local out = vim.fn.systemlist({ "git", "merge-base", branch, "HEAD" })
+            if vim.v.shell_error == 0 and out[1] then
+              return vim.trim(out[1])
+            end
+          end
+          vim.notify("gitsigns: no main/master branch found", vim.log.levels.WARN)
+        end
+
         map("n", "]h", function()
           if vim.wo.diff then
             vim.cmd.normal({ "]c", bang = true })
@@ -73,6 +86,15 @@ return {
         map("n", "<leader>ghb", function() gs.blame_line({ full = true }) end, "Blame line")
         map("n", "<leader>ghB", gs.blame, "Blame buffer")
         map("n", "<leader>ghd", gs.diffthis, "Diff this")
+        map("n", "<leader>ghD", function()
+          local base = merge_base()
+          if base then gs.diffthis(base) end
+        end, "Diff this vs main")
+        map("n", "<leader>ghm", function()
+          local base = merge_base()
+          if base then gs.change_base(base, true) end
+        end, "Signs vs main (all buffers)")
+        map("n", "<leader>ghM", function() gs.change_base(nil, true) end, "Signs vs index (reset)")
         map({ "o", "x" }, "ih", ":<C-U>Gitsigns select_hunk<CR>", "Select hunk")
         -- stylua: ignore end
       end,
