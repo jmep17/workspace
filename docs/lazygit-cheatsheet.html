@@ -149,6 +149,7 @@
   <a href="#stash">Stash</a>
   <a href="#conflicts">Merge conflicts</a>
   <a href="#workflows">Handy workflows</a>
+  <a href="#glossary">Glossary</a>
 </nav>
 
 <section id="launching">
@@ -340,22 +341,60 @@
 </section>
 
 <section id="undo-lines" class="featured">
-  <h2>Undo only some lines in a file from a previous commit</h2>
-  <p class="note">You committed a file a few commits ago, and some of those lines were a mistake — but the rest of the commit is fine. This uses the custom patch builder to surgically pull just those lines back out.</p>
+  <h2>Undo only some lines in a file from a previous commit — all the ways</h2>
+  <p class="note">The situation: a few commits ago you committed a file, and some of those lines were a mistake — but the rest of the commit (and the commits after it) are fine. There are five ways to fix this, split into two families: methods that <strong>rewrite history</strong> (the mistake disappears as if it never happened, but commits get new SHAs, so a pushed branch needs a force-push) and methods that <strong>add a new commit on top</strong> (the mistake stays visible in history, but nothing is rewritten — always safe on shared branches). Unsure which commit introduced the lines? <kbd>ctrl+s</kbd> → filter by path, or launch with <code>lazygit -f &lt;file&gt;</code>.</p>
+
+  <h3>Method 1 — Custom patch builder (rewrites history; the most surgical)</h3>
+  <p class="note"><em>What it means:</em> you select the exact lines inside the old commit, lazygit builds a patch (a mini-diff) from them, then runs an interactive rebase behind the scenes that re-creates the commit without those lines.</p>
   <ol class="steps">
-    <li>Go to the <strong>commits panel</strong> (<kbd>4</kbd>) and select the commit that introduced the bad lines. (Tip: <kbd>ctrl+s</kbd> → filter by path, or <code>lazygit -f &lt;file&gt;</code>, helps find which commit touched the file.)</li>
-    <li>Press <kbd>enter</kbd> to see the commit's files, select the file, and press <kbd>enter</kbd> again to view its diff.</li>
-    <li>Select only the lines you want to undo: move with <kbd>j</kbd>/<kbd>k</kbd>, press <kbd>v</kbd> to start a range selection, then press <kbd>space</kbd> to add the selected lines to the custom patch. (<kbd>a</kbd> grabs a whole hunk; <kbd>space</kbd> again toggles lines back out; <kbd>d</kbd> removes lines from the patch.)</li>
-    <li>Press <kbd>esc</kbd> to step back, then press <kbd>ctrl+p</kbd> to open the custom patch options. Pick one:
-      <ul>
-        <li><strong>Remove patch from commit</strong> — the lines are undone as if never committed. History is rewritten; the rest of the commit stays intact.</li>
-        <li><strong>Move patch out into index</strong> — the lines leave the commit but land as staged changes, so you can inspect, tweak, or drop them yourself.</li>
-        <li><strong>Apply patch in reverse</strong> — reverts those lines in your <em>working tree only</em>, without rewriting the commit. Use this if the branch is already shared/pushed and you'd rather commit a small revert.</li>
-      </ul>
-    </li>
-    <li>If later commits also touched those lines you'll get conflicts — resolve them in the conflicts view, then continue with <kbd>m</kbd>.</li>
+    <li><strong>Commits panel</strong> (<kbd>4</kbd>) → select the commit → <kbd>enter</kbd> to see its files → select the file → <kbd>enter</kbd> to view its diff.</li>
+    <li>Select only the lines to undo: move with <kbd>j</kbd>/<kbd>k</kbd>, <kbd>v</kbd> to start a range selection, then <kbd>space</kbd> to add them to the patch. (<kbd>a</kbd> grabs a whole hunk; <kbd>space</kbd> toggles lines back out.)</li>
+    <li><kbd>esc</kbd>, then <kbd>ctrl+p</kbd> → <strong>remove patch from commit</strong>. Done — the commit now exists without those lines. (Or <strong>move patch out into index</strong> if you want the removed changes handed back to you as staged changes instead of deleted.)</li>
+    <li>If later commits touched the same lines you'll get conflicts — resolve, then <kbd>m</kbd> → continue.</li>
   </ol>
-  <div class="callout">⚠️ The first two options rewrite history (an interactive rebase under the hood), so you'll need a force-push (<kbd>P</kbd>, lazygit offers <code>--force-with-lease</code>) if the commit was already pushed. Avoid on shared branches — use <strong>apply in reverse</strong> or <kbd>t</kbd> (revert) instead. And if it goes sideways: <kbd>z</kbd> undoes it.</div>
+
+  <h3>Method 2 — Edit the commit mid-rebase (rewrites history; most flexible)</h3>
+  <p class="note"><em>What it means:</em> this is classic <code>git rebase -i</code> with an <code>edit</code> action — git "rewinds" the branch to the bad commit, pauses so you can change it, then replays the rest on top. Use it when the fix is more involved than deleting lines (e.g. you also want to rewrite them).</p>
+  <ol class="steps">
+    <li>Commits panel → select the bad commit → <kbd>e</kbd>. The rebase pauses with that commit as the latest one.</li>
+    <li>Fix the file in your editor (<kbd>e</kbd> on it in the files panel), then stage the fix and press <kbd>A</kbd> to amend it into the (now-latest) commit.</li>
+    <li><kbd>m</kbd> → continue the rebase. The remaining commits are replayed on top of the corrected one.</li>
+  </ol>
+
+  <h3>Method 3 — Fixup commit (rewrites history; good for review-then-squash flows)</h3>
+  <p class="note"><em>What it means:</em> instead of touching the old commit directly, you commit the correction now as a special <code>fixup!</code> commit "addressed to" the old commit, and squash it in afterwards (git's <code>--autosquash</code>). Nice because you can batch several corrections before rewriting once.</p>
+  <ol class="steps">
+    <li>Fix the lines in your editor, then stage just that change (files panel → <kbd>enter</kbd> the file → <kbd>space</kbd> on lines).</li>
+    <li>Commits panel → select the original commit → <kbd>F</kbd> to create a <code>fixup!</code> commit. (Shortcut: <kbd>ctrl+f</kbd> in the files panel finds the right target commit for you automatically.)</li>
+    <li>When ready, select the original commit and press <kbd>S</kbd> — all its <code>fixup!</code> commits above get squashed in, as if the mistake never happened.</li>
+  </ol>
+
+  <h3>Method 4 — Forward fix: reverse the lines in your working tree (no rewrite; safest)</h3>
+  <p class="note"><em>What it means:</em> history is left alone. You change the lines back to how they were and commit that as a <em>new</em> commit. The mistake and its undo are both visible in the log — which is exactly what you want on a shared or pushed branch. Two ways to get the old lines back without retyping them:</p>
+  <ol class="steps">
+    <li><strong>Reverse-apply a patch:</strong> build the patch exactly as in Method 1 (commit → file → select lines → <kbd>space</kbd>), but at the <kbd>ctrl+p</kbd> menu choose <strong>apply patch in reverse</strong>. The lines flip back to their previous state in your working tree only — no commits touched.</li>
+    <li><em>— or —</em> <strong>Checkout the old file version:</strong> select the commit <em>before</em> the bad one → <kbd>enter</kbd> → select the file → <kbd>c</kbd> to check out the file as it was at that commit. This restores the <em>whole</em> file as it was, so next: files panel → <kbd>enter</kbd> the file → stage only the lines that undo the mistake → <kbd>d</kbd> to discard the rest.</li>
+    <li>Commit as normal (<kbd>c</kbd>) — e.g. <em>"undo debug logging from abc123"</em>. Push without force.</li>
+  </ol>
+
+  <h3>Method 5 — Revert the whole commit, then trim (no rewrite)</h3>
+  <p class="note"><em>What it means:</em> <kbd>t</kbd> on a commit is <code>git revert</code> — it creates a new "anti-commit" containing the exact inverse of every change in the original. Perfect as-is when the whole commit was bad. If only some lines were bad:</p>
+  <ol class="steps">
+    <li>Commits panel → select the bad commit → <kbd>t</kbd> to revert it (the anti-commit appears at the top).</li>
+    <li>Select the new revert commit → <kbd>g</kbd> → <strong>mixed reset</strong> to the commit below it. The revert commit is un-committed and all its reversals become unstaged changes.</li>
+    <li>Files panel → keep only the reversals you want (stage those lines), discard the rest with <kbd>d</kbd>, and commit.</li>
+  </ol>
+
+  <h3>Which one should I use?</h3>
+  <div class="table-scroll"><table>
+    <tr><th>Method</th><th>Rewrites history?</th><th>Best when</th></tr>
+    <tr><td>1. Custom patch</td><td>Yes — force-push if pushed</td><td>Pure line deletion on a branch only you work on; fewest steps, all inside lazygit</td></tr>
+    <tr><td>2. Edit mid-rebase</td><td>Yes</td><td>The fix needs real editing, not just removing lines</td></tr>
+    <tr><td>3. Fixup commit</td><td>Yes (at squash time)</td><td>You want to batch corrections, or squash later after review</td></tr>
+    <tr><td>4. Forward fix</td><td><strong>No</strong></td><td>Branch is shared or already pushed — the default safe choice</td></tr>
+    <tr><td>5. Revert + trim</td><td><strong>No</strong></td><td>Most of the commit was bad anyway, or you want an explicit undo in the log</td></tr>
+  </table></div>
+  <div class="callout">⚠️ <strong>Rewriting history</strong> (methods 1–3) gives commits new SHAs, so if the branch was already pushed you must force-push (<kbd>P</kbd> — lazygit offers <code>--force-with-lease</code>, which aborts if someone else pushed in the meantime). Anyone else with the branch checked out will have to reset onto it. On shared branches prefer methods 4–5. And if anything goes sideways: <kbd>z</kbd> walks the reflog and undoes it.</div>
 </section>
 
 <section id="stash">
@@ -397,6 +436,32 @@
     <li><strong>Diff two branches</strong>: <kbd>W</kbd> on the first ref → move to the second → <kbd>W</kbd> → view diff; <kbd>esc</kbd> exits diff mode.</li>
     <li><strong>Bisect</strong>: commits panel → <kbd>b</kbd> on a bad commit → mark good/bad as it steps.</li>
   </ul>
+</section>
+
+<section id="glossary">
+  <h2>Glossary — what these things actually mean</h2>
+  <div class="table-scroll"><table>
+    <tr><th>Term</th><th>Meaning</th></tr>
+    <tr><td><strong>Working tree</strong></td><td>The files on disk as you currently see them — your editable copy of the project.</td></tr>
+    <tr><td><strong>Index / staging area</strong></td><td>The draft of your next commit. <kbd>space</kbd> moves changes between the working tree and the index; only staged changes end up in the commit.</td></tr>
+    <tr><td><strong>Commit</strong></td><td>A permanent snapshot of the whole project, identified by a SHA hash. Commits are never edited in place — "changing" one really means replacing it with a new commit.</td></tr>
+    <tr><td><strong>HEAD</strong></td><td>The commit you currently have checked out — usually the tip of your branch.</td></tr>
+    <tr><td><strong>Patch</strong></td><td>A list of line-level changes (a diff) that can be applied to code — or applied <em>in reverse</em> to undo those same lines. Lazygit's custom patch builder lets you assemble one interactively from a commit.</td></tr>
+    <tr><td><strong>Hunk</strong></td><td>One contiguous block of changed lines within a diff. Staging "by hunk" (<kbd>a</kbd>) grabs a whole block at once instead of line by line.</td></tr>
+    <tr><td><strong>Interactive rebase</strong></td><td>Git rewinds your branch and replays its commits one at a time, letting you reorder, drop, squash, or edit each along the way. Nearly all of lazygit's history-editing keys are shortcuts that drive one of these behind the scenes.</td></tr>
+    <tr><td><strong>Rewriting history</strong></td><td>Replacing existing commits with new ones (new SHAs). Harmless on a branch only you use; on a pushed branch it requires a force-push and disrupts anyone else tracking that branch.</td></tr>
+    <tr><td><strong>Revert</strong></td><td>A <em>new</em> commit containing the exact inverse of an earlier commit's changes (<kbd>t</kbd>). Undoes the effect without rewriting history.</td></tr>
+    <tr><td><strong>Reset</strong></td><td>Moves your branch pointer to an earlier commit. <em>Soft</em>: later changes stay staged. <em>Mixed</em>: they stay in the working tree, unstaged. <em>Hard</em>: they're discarded entirely.</td></tr>
+    <tr><td><strong>Fixup commit</strong></td><td>A commit whose message starts with <code>fixup!</code>, marking it as a correction destined to be squashed into a specific earlier commit (<kbd>F</kbd> to create, <kbd>S</kbd> to squash them in).</td></tr>
+    <tr><td><strong>Squash</strong></td><td>Combining two or more commits into one. "Squash" keeps both messages; "fixup" keeps only the original's.</td></tr>
+    <tr><td><strong>Cherry-pick</strong></td><td>Copying a commit's changes onto another branch as a new commit (<kbd>C</kbd> then <kbd>V</kbd>), without merging the whole branch.</td></tr>
+    <tr><td><strong>Stash</strong></td><td>A shelf for uncommitted changes: <kbd>s</kbd> sets them aside to get a clean working tree, and they can be re-applied later — even on another branch.</td></tr>
+    <tr><td><strong>Force-push</strong></td><td>Overwriting the remote branch with your rewritten local one. Lazygit uses <code>--force-with-lease</code>, which refuses if someone else pushed in the meantime — always prefer it over a plain force.</td></tr>
+    <tr><td><strong>Reflog</strong></td><td>A local journal of every position HEAD has been at. It's why <kbd>z</kbd> can undo "destructive" operations like resets and botched rebases — the old commits are still reachable.</td></tr>
+    <tr><td><strong>Merge conflict</strong></td><td>When two changes touch the same lines and git can't pick a winner, it stops and asks you to choose (the conflicts view). After resolving, <kbd>m</kbd> continues the operation.</td></tr>
+    <tr><td><strong>Upstream</strong></td><td>The remote branch your local branch tracks — what <kbd>p</kbd> pulls from and <kbd>P</kbd> pushes to.</td></tr>
+    <tr><td><strong>Detached HEAD</strong></td><td>Checking out a commit directly instead of a branch (<kbd>space</kbd> on a commit). Fine for looking around; create a branch (<kbd>n</kbd>) before committing new work there.</td></tr>
+  </table></div>
 </section>
 
 <footer>Defaults verified against lazygit's <code>pkg/config/user_config.go</code>. Your own config lives at the path shown by <kbd>e</kbd> in the status panel.</footer>
