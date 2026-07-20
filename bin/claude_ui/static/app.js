@@ -2453,6 +2453,23 @@ const WIZ_TPLS = {
     body: (t) => "# " + t + "\n\nPrefer the command below over ad-hoc versions.\n\n" +
       "## Usage\n\n```bash\n<command here>\n```\n\n" +
       "## Notes\n\n- What to do when it fails.\n" },
+  migration: { label: "migration",
+    hint: "pattern-based codemod — old API/component → new, one unit at a time",
+    body: (t) => "# " + t + "\n\nMigrate one <component/module> from <old system> to <new system> " +
+      "using the documented patterns — apply them mechanically, don't redesign.\n\n" +
+      "## Steps\n\n" +
+      "1. Identify which pattern category the target falls into " +
+      "(see references/patterns.md), then read only that section.\n" +
+      "2. Apply the before → after transform exactly. Don't \"improve\" adjacent " +
+      "code — consistency across the migration matters more than local polish.\n" +
+      "3. Verify: <build / test / lint command for one unit>.\n" +
+      "4. Grep for leftovers that must not survive: <old import path>, <deprecated prop>.\n" +
+      "5. Record the unit as migrated in <ledger location>.\n\n" +
+      "## When no pattern matches\n\n" +
+      "Don't invent a new pattern. Find the 2–3 most similar already-migrated " +
+      "units in the ledger and study their real transforms " +
+      "(`git log --follow <file>`), then stop and flag the novel case for a " +
+      "human decision before proceeding.\n" },
   blank: { label: "blank", hint: "start from nothing",
     body: (t) => "# " + t + "\n\n" },
 };
@@ -2472,6 +2489,10 @@ const WIZ_EXAMPLES = [
     what: "Builds the app and captures simulator screenshots via scripts/snap.sh",
     when: "the user wants to see the app, verify a UI change, or asks for a screenshot",
     phrases: ["show me the app", "screenshot the login screen"] },
+  { label: "component migration (migration)",
+    what: "Migrates a component from OldSystem to NewSystem using the documented before/after patterns",
+    when: "migrating, converting, or updating a component, or touching any file that still imports from the old package — even if the user doesn't say \"migrate\"",
+    phrases: ["migrate the Button component", "convert this to the new design system"] },
 ];
 
 // Markdown sections the body step can append with one click.
@@ -2488,7 +2509,8 @@ const WIZ_TOOL_PRESETS = [
   ["gh pr", "Bash(gh pr view *) Bash(gh pr diff *)"],
   ["web", "WebFetch WebSearch"],
 ];
-const WIZ_REF_IDEAS = ["examples.md", "checklist.md", "api-reference.md", "troubleshooting.md"];
+const WIZ_REF_IDEAS = ["examples.md", "checklist.md", "api-reference.md", "troubleshooting.md",
+  "patterns.md", "edge-cases.md"];
 const WIZ_ARG_IDEAS = ["[issue-number]", "[file] [format]", "[branch]"];
 
 const wizBlank = () => ({ step: 0, name: "", group: "", what: "", when: "",
