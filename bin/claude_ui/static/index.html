@@ -1,0 +1,122 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude config</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<main>
+  <div class="head">
+    <h1><span class="cfg" id="cfgprefix">~/.claude/</span>config</h1>
+    <span class="spring"></span>
+    <button class="small" id="themebtn" title="toggle light/dark theme">◐ theme</button>
+  </div>
+  <p class="sub">Skills, commands, agents, and config files — versioned here, symlinked into the Claude config dir. Collections (like <b>work/</b>, gitignored) mirror the same shape and merge in automatically. Everything is plain files: review &amp; commit with git — or use the git panel below. <b>Ctrl/⌘-K</b> opens the command palette.</p>
+  <details id="links">
+    <summary>links <span id="linksum"></span></summary>
+    <div id="linkrows"></div>
+    <div class="cfgdir" id="cfgrow"></div>
+    <div class="cfgdir hint" id="cfghint"></div>
+  </details>
+  <details id="git">
+    <summary>git <span id="gitsum"></span></summary>
+    <div id="gitbody"></div>
+  </details>
+  <details id="help">
+    <summary>how this works</summary>
+    <div class="helpbody">
+      <p><b>The repo is the source of truth; the config dir just points at it.</b>
+      Claude Code reads one config dir (<code>~/.claude</code> by default). The links
+      panel symlinks each piece of it — skills, commands, agents, output-styles,
+      CLAUDE.md, settings.json, keybindings.json — to files in this repo, so your
+      real config lives in git and a <code>git pull</code> updates every machine.</p>
+      <p><b>Importing an existing config:</b> setting "config dir" to a path does
+      NOT import anything by itself — it only chooses where the symlinks are
+      managed. But when a row shows "real", clicking <b>link</b> takes over that
+      content: if the repo side doesn't exist yet it is <i>adopted</i> (moved into
+      the repo, then symlinked back — commit it after); if the repo side already
+      exists, the old content is renamed to <code>*.bak</code> next to it and the
+      link replaces it. Alternatively, <b>⇪ folder</b>-upload any config-shaped
+      directory (containing skills/, commands/, CLAUDE.md, ...) to import it as a
+      <i>collection</i> without touching your live config.</p>
+      <p><b>Collections</b> are extra config sets at the repo root (e.g.
+      <code>work/</code>). Their skills/commands/agents/output-styles merge into the
+      live config automatically via generated symlinks (a collection command runs as
+      <code>/&lt;collection&gt;:&lt;name&gt;</code>; a collection skill loads as
+      <code>&lt;collection&gt;-&lt;name&gt;</code>). Config files can't merge — Claude
+      Code reads exactly one CLAUDE.md / settings.json — so each file row has a
+      <i>source</i> dropdown choosing which copy is linked on this machine.
+      <code>work/</code> is gitignored: private, one folder, never committed.</p>
+      <p><b>MCP servers</b> are different: Claude Code stores user-scope servers in
+      <code>~/.claude.json</code> (machine state, NOT inside the config dir, and not
+      affected by the config-dir setting). The mcp tab keeps server definitions
+      versioned in the repo (<code>claude/mcp-servers.json</code> or a collection's
+      copy) and <b>applies</b> them into <code>~/.claude.json</code> per machine;
+      machine-only servers can be adopted into the repo or removed.</p>
+      <p><b>Statusline:</b> every field documented in the
+      <a href="https://code.claude.com/docs/en/statusline" target="_blank">statusline
+      stdin schema</a> is available from the palette on the right, grouped by
+      category — click or drag a field onto a line, drag chips to reorder or
+      move them between lines, and drag one back to the palette (or hit its ×)
+      to remove it. Up to four lines are supported (narrow terminals truncate a
+      long single line). Click a chip to pick its colour — one of the palette
+      presets or a custom hex colour (custom needs a truecolor terminal) — or
+      toggle <b>bold</b>. Preset layouts give a quick starting point. A visible
+      separator automatically gets a space on each side and renders dimmed so
+      the fields stand out. Claude Code re-runs the script after each
+      assistant message — set a refresh interval to also update while idle; no
+      restart is ever needed. The cost today / 7 days / month fields shell out
+      to <code>ccusage</code> (or <code>npx ccusage</code>) in the background and
+      cache results for 5 minutes — they stay hidden until the first refresh
+      completes, and show nothing if ccusage isn't available.</p>
+      <p><b>Limitations:</b> a non-default config dir only takes effect if you
+      <code>export CLAUDE_CONFIG_DIR=...</code> in your shell — the UI can't do that
+      for you. Claude Code reads settings/CLAUDE.md at session start, so changes
+      apply to new sessions. Skills must be direct children of the skills dir
+      (that's why nested folders get generated links). Moving a skill into a
+      folder renames it (<code>tdd</code> → <code>ai-tdd</code>). Nothing here
+      touches project-level config (<code>.claude/</code>, <code>.mcp.json</code>
+      inside your projects). This page runs locally from your clone and edits
+      plain files — nothing is committed behind your back; the git panel up top
+      shows what changed, with per-file diffs and an explicit commit button.</p>
+    </div>
+  </details>
+  <div class="tabs" id="tabs"></div>
+  <div id="editorview" hidden></div>
+  <div id="mcpview" hidden></div>
+  <div id="stlview" hidden></div>
+  <div id="settingsview" hidden></div>
+  <div id="insightview" hidden></div>
+  <div id="costsview" hidden></div>
+  <div id="doctorview" hidden></div>
+  <div id="itemsview">
+  <div class="bar">
+    <input type="search" id="q" placeholder="filter…  ( / )" autofocus>
+    <select id="sortsel" title="sort order">
+      <option value="name">a–z</option>
+      <option value="recent">recent</option>
+    </select>
+    <button onclick="newGroup()">+ folder</button>
+    <button onclick="document.getElementById('up').click()">⇪ folder</button>
+    <button onclick="document.getElementById('upf').click()">⇪ files</button>
+    <button onclick="importUrl()" title="import a skill, group, or collection from a GitHub URL">⇓ url</button>
+    <button class="primary" onclick="newItem()">+ new</button>
+    <input type="file" id="up" webkitdirectory multiple hidden>
+    <input type="file" id="upf" multiple hidden>
+  </div>
+  <div id="bulkbar" class="bar" hidden></div>
+  <div id="groups" class="groups" hidden></div>
+  <h2>Active <span class="count" id="n-active"></span></h2>
+  <div id="active"></div>
+  <h2>Archive <span class="count" id="n-archived"></span></h2>
+  <div id="archived"></div>
+  </div>
+</main>
+<div id="toasts"></div>
+<div id="modal" hidden></div>
+<div id="palette" hidden></div>
+<script>
+const SCHEMA = __SCHEMA__;
+const TOKEN = "__TOKEN__";
+</script>
+<script src="/app.js"></script>
