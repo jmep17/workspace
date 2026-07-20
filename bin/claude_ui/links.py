@@ -1,6 +1,9 @@
 """The links panel: symlinking repo content into the Claude config dir."""
 
 from pathlib import Path
+import re
+import subprocess
+import sys
 
 from .core import MAPPINGS, REPO, collections, config_dir, get_source, mapping_repo
 
@@ -77,3 +80,46 @@ def do_unlink(mid):
     if not target.is_symlink():
         raise ValueError(f"{m['cfg']}: not a symlink")
     target.unlink()
+
+def _latest_backup(target):
+    """Newest do_link() backup for target: .bak < .bak1 < .bak2 < ..."""
+    best, best_n = None, -1
+    pat = re.compile(re.escape(target.name) + r"\.bak(\d*)$")
+    for p in target.parent.iterdir():
+        m = pat.match(p.name)
+        if m:
+            n = int(m.group(1) or 0)
+            if n > best_n:
+                best, best_n = p, n
+    return best
+
+def do_reset():
+    """Undo claude-ui's work: drop every managed symlink, restore backups."""
+    removed, restored = [], []
+    for mid, m in MAPPINGS.items():
+        target = config_dir() / m["cfg"]
+        if not target.is_symlink():
+            continue
+        target.unlink()
+        removed.append(m["cfg"])
+        backup = _latest_backup(target)
+        if backup is not None:
+            backup.rename(target)
+            restored.append(m["cfg"])
+    return {"removed": removed, "restored": restored}
+
+def do_open(mid):
+    """Open a mapping's folder in the OS file manager (Finder on macOS)."""
+    m = MAPPINGS.get(mid)
+    if not m:
+        raise ValueError("unknown link id")
+    target = config_dir() / m["cfg"]
+    path = target if (target.exists() or target.is_symlink()) else mapping_repo(mid)
+    if not path.exists():
+        raise ValueError(f"{m['cfg']}: nothing to open (neither target nor repo side exists)")
+    if sys.platform == "darwin":
+        cmd = ["open", "-R", str(path)] if path.is_file() else ["open", str(path)]
+    else:
+        cmd = ["xdg-open", str(path.parent if path.is_file() else path)]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"path": str(path)}

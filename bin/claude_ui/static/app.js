@@ -190,6 +190,7 @@ function renderLinks() {
     const extra = l.points_to ? " (" + esc(l.points_to) + ")" : "";
     const canLink = l.status !== "linked" && l.status !== "absent";
     const canUnlink = l.status === "linked" || l.status === "elsewhere";
+    const canOpen = l.status !== "absent" && (l.status !== "missing" || l.repo_exists);
     const src = l.candidates
       ? `<select onchange="doSource('${l.id}', this.value)" title="which copy is linked">` +
         l.candidates.map((c) =>
@@ -201,6 +202,7 @@ function renderLinks() {
       `<span class="lname">${esc(l.target)}</span>` + src +
       `<span class="lstat ${cls}">${txt}${extra} · repo: ${esc(l.repo)}${l.repo_exists ? "" : " (missing)"}</span>` +
       (l.kind === "file" ? `<button class="small" onclick="openEditor('${l.id}')">edit</button>` : "") +
+      (canOpen ? `<button class="small" onclick="doOpen('${l.id}')" title="open in the file manager">open</button>` : "") +
       (canLink ? `<button class="small" onclick="doLink('${l.id}')">link</button>` : "") +
       (canUnlink ? `<button class="small danger" onclick="doUnlink('${l.id}')">unlink</button>` : "");
     box.appendChild(row);
@@ -222,7 +224,8 @@ function renderLinks() {
       `</span><span style="flex:1"></span>` +
       `<button class="small" onclick="genBootstrap()" title="write a committable bootstrap.sh that links everything on a new machine">bootstrap.sh</button>` +
       `<button class="small" onclick="CFGEDIT=true;render()">change…</button>` +
-      (DATA.default_dir ? "" : `<button class="small" onclick="resetCfgDir()">reset to default</button>`);
+      (DATA.default_dir ? "" : `<button class="small" onclick="resetCfgDir()">reset to default</button>`) +
+      `<button class="small danger" onclick="resetLinks()" title="remove every managed symlink from the config dir and restore *.bak backups">reset links</button>`;
   }
   document.getElementById("cfghint").textContent = DATA.default_dir
     ? "" : "non-default config dir: Claude Code only uses it if CLAUDE_CONFIG_DIR is exported in your shell";
@@ -335,6 +338,26 @@ async function doLink(id) {
 async function doUnlink(id) {
   try { await api("/api/unlink", { id }); toast("unlinked"); await refresh(); }
   catch (e) { toast(e.message, true); }
+}
+
+async function doOpen(id) {
+  try { await api("/api/open", { id }); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function resetLinks() {
+  const linked = DATA.links.filter((l) => l.status === "linked" || l.status === "elsewhere");
+  if (!linked.length) { toast("nothing linked — already reset"); return; }
+  if (!(await mconfirm("reset links",
+    "Remove " + linked.length + " symlink(s) from " + DATA.config_dir +
+    " and restore *.bak backups where they exist. The repo keeps everything; " +
+    "Claude Code goes back to whatever was there before linking.", "reset"))) return;
+  try {
+    const r = await api("/api/reset-links", {});
+    toast("removed " + r.removed.length + " link(s)" +
+      (r.restored.length ? ", restored " + r.restored.length + " backup(s)" : ""));
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
 let CFGEDIT = false;

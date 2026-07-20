@@ -15,7 +15,7 @@ import webbrowser
 
 from .core import CONFIG_FILES, NAME_RE, NON_COLLECTIONS, REPO, SKILLS, TOKEN, TYPES, collections, config_dir, read_cfg, set_config_dir, set_source
 from .items import SKILL_TEMPLATE, SK_ARCHIVE, TEMPLATES, ensure_md_collection, group_content_dir, is_group, item_read, item_save, md_group_info, md_groups, md_path, md_rel, migrate_legacy_work, movable_skill, reconcile_links, resolve_skill, scan_md, scan_skills, skill_creation_path, skill_groups_map, skills_group_info, split_managed, trash_put, undelete, update_skill_name
-from .links import do_link, do_unlink, link_state
+from .links import do_link, do_open, do_reset, do_unlink, link_state
 from .uploads import classify_skill_upload, normalize_collection_upload, normalize_skill_upload, stage_upload, write_staged
 from .mcp import mcp_machine_set, mcp_repo_config, mcp_state, mcp_test, mcp_write_repo
 from .settings import SETTINGS_SCHEMA, file_read, file_save, hook_test, settings_set, settings_state
@@ -489,6 +489,12 @@ class Handler(BaseHTTPRequestHandler):
             if action == "unlink":
                 do_unlink(req.get("id", ""))
                 self.send(200, {"ok": True})
+                return
+            if action == "reset-links":
+                self.send(200, {"ok": True, **do_reset()})
+                return
+            if action == "open":
+                self.send(200, {"ok": True, **do_open(req.get("id", ""))})
                 return
             if action == "config-dir":
                 set_config_dir((req.get("path") or "").strip())
