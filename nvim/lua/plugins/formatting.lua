@@ -30,7 +30,9 @@ return {
       json = { "prettier" },
       jsonc = { "prettier" },
       yaml = { "prettier" },
-      markdown = { "prettier" },
+      -- prettier normalizes style, then markdownlint --fix cleans up the
+      -- fixable lint rules so diagnostics don't linger after save
+      markdown = { "prettier", "markdownlint" },
       graphql = { "prettier" },
     },
     formatters = {

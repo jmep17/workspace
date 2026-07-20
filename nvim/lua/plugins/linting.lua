@@ -5,6 +5,9 @@ return {
   event = { "BufReadPost", "BufWritePost", "InsertLeave" },
   config = function()
     local lint = require("lint")
+    -- MD013 (line-length) is noise for prose, and nothing autofixes it:
+    -- prettier's default proseWrap never re-wraps existing lines.
+    lint.linters.markdownlint.args = { "--disable", "MD013", "--stdin" }
     lint.linters_by_ft = {
       sh = { "shellcheck" },
       bash = { "shellcheck" },
