@@ -1,5 +1,5 @@
 # Ghostty config — hand-rolled, everything explicit.
-# Bootstrap: ln -s ~/src/workspace/ghostty ~/.config/ghostty
+# Bootstrap: ln -s ~/src/workspace/.config/ghostty ~/.config/ghostty
 # Reload with cmd+shift+, — no restart needed for most keys.
 # Docs: ghostty +show-config --default --docs
 
@@ -61,7 +61,7 @@ keybind = cmd+physical:nine=text:\x019
 # PATH; on an Intel Mac use /usr/local/bin/tmux instead.
 command = /opt/homebrew/bin/tmux new-session -A -s main
 
-# Inside those panes tmux runs fish (fish/ in this repo, via tmux's
+# Inside those panes tmux runs fish (.config/fish in this repo, via tmux's
 # default-shell); Ghostty detects it and injects shell integration
 # through env vars that fish's vendor conf.d picks up inside tmux.
 shell-integration = detect

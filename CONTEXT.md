@@ -2,12 +2,13 @@
 
 Personal workspace repo; home to a hand-rolled Neovim configuration built
 greenfield for ownership and understanding, plus matching terminal configs
-(`tmux/`, `ghostty/`, `fish/`) bootstrapped the same way — symlinked into `~/.config`.
+(tmux, Ghostty, fish) bootstrapped the same way — all under `.config/`,
+each symlinked into `~/.config` by name.
 
 ## Language
 
 **Workspace config**:
-The hand-rolled Neovim configuration at `nvim/`, loaded via `NVIM_APPNAME=nvim-ws` (fish: `vv`).
+The hand-rolled Neovim configuration at `.config/nvim/`, loaded via `NVIM_APPNAME=nvim-ws` (fish: `vv`).
 _Avoid_: new config, fresh config
 
 **LazyVim backup**:
@@ -24,4 +25,4 @@ A language with the full toolchain — LSP, formatting, linting, testing, debugg
 Formats that get LSP/formatting but no test/debug investment: JSON, YAML, Docker, Markdown, Lua, HTML/CSS/Tailwind.
 
 **Swap slot**:
-A server choice structured so replacing it is a one-line edit in `nvim/lua/plugins/lsp.lua`: vtsls → tsgo, basedpyright → pyrefly.
+A server choice structured so replacing it is a one-line edit in `.config/nvim/lua/plugins/lsp.lua`: vtsls → tsgo, basedpyright → pyrefly.

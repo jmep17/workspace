@@ -2,7 +2,7 @@
 .claude-ui.json
 
 # fish universal variables — machine state written next to the config
-fish/fish_variables
+.config/fish/fish_variables
 
 # The private "work" collection and its bridge links stay uncommitted
 /work/

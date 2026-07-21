@@ -1,14 +1,16 @@
 # workspace
 
-Personal workspace repo: hand-rolled configs for Neovim, tmux, and Ghostty,
-each symlinked into `~/.config`. Domain language lives in
-[`CONTEXT.md`](CONTEXT.md); decisions in [`docs/adr/`](docs/adr/).
+Personal workspace repo: hand-rolled configs for Neovim, tmux, Ghostty, and
+fish, mirrored under `.config/` and symlinked per-app into `~/.config`.
+Domain language lives in [`CONTEXT.md`](CONTEXT.md); decisions in
+[`docs/adr/`](docs/adr/).
 
 ```
-nvim/      Neovim config (see nvim/README.md for details)
-tmux/      tmux.conf — C-a prefix, vi copy mode, gruvbox status line
-ghostty/   Ghostty config — gruvbox theme, ⌘-key tmux bindings
-fish/      fish config — gruvbox colors/prompt; every tmux pane runs it
+.config/   mirrors ~/.config — each child is symlinked in by name
+  nvim/    Neovim config (see .config/nvim/README.md for details)
+  tmux/    tmux.conf — C-a prefix, vi copy mode, gruvbox status line
+  ghostty/ Ghostty config — gruvbox theme, ⌘-key tmux bindings
+  fish/    fish config — gruvbox colors/prompt; every tmux pane runs it
 skills/    Claude Code skills      → linked as <config dir>/skills
 commands/  Claude Code commands    → linked as <config dir>/commands
 agents/    Claude Code subagents   → linked as <config dir>/agents
@@ -35,18 +37,26 @@ brew install --cask ghostty font-jetbrains-mono-nerd-font
 
 ```fish
 git clone git@github.com:jmep17/workspace.git ~/src/workspace
-ln -s ~/src/workspace/nvim ~/.config/nvim
-ln -s ~/src/workspace/tmux ~/.config/tmux
-ln -s ~/src/workspace/ghostty ~/.config/ghostty
-ln -s ~/src/workspace/fish ~/.config/fish
+for d in ~/src/workspace/.config/*/
+    ln -s (path resolve $d) ~/.config/(path basename $d)
+end
 bin/claude-ui   # then click "link" on each Claude config mapping
 ```
 
-If a config directory already exists (a work machine may ship defaults),
-move it aside first: `mv ~/.config/nvim ~/.config/nvim.bak`.
+The loop links every child of the repo's `.config/` into `~/.config` by
+name — new configs added to the repo later just need the loop re-run (it
+skips nothing, but `ln -s` fails loudly on names that already exist).
+Don't symlink `~/.config` itself: plenty of other tools write machine
+state there, and it would all land in the repo.
+
+If a config directory already exists (a work machine may ship defaults,
+and running fish once auto-creates `~/.config/fish`), move it aside
+first — `mv ~/.config/nvim ~/.config/nvim.bak` — otherwise `ln -s`
+creates the link *inside* the existing directory (a nested
+`~/.config/fish/fish` that the tool never reads) instead of replacing it.
 
 - **nvim** reads `~/.config/nvim` — first launch installs plugins and Mason
-  tools; see [`nvim/README.md`](nvim/README.md).
+  tools; see [`.config/nvim/README.md`](.config/nvim/README.md).
 - **tmux** ≥ 3.1 reads `~/.config/tmux/tmux.conf` natively — no `~/.tmux.conf`
   needed. Reload a running server with `prefix r`.
 - **Ghostty** reads `~/.config/ghostty/config` — reload with `cmd+shift+,`.
@@ -56,7 +66,7 @@ move it aside first: `mv ~/.config/nvim ~/.config/nvim.bak`.
   launches fish directly (`default-shell` in `tmux.conf`), and Ghostty
   launches tmux, so every pane lands in it. To make fish the login shell
   anyway: `echo /opt/homebrew/bin/fish | sudo tee -a /etc/shells` then
-  `chsh -s /opt/homebrew/bin/fish`. `fish/fish_variables` (universal
+  `chsh -s /opt/homebrew/bin/fish`. `.config/fish/fish_variables` (universal
   variables) is machine state and gitignored — the config uses `set -g`
   so the file in git stays the source of truth.
 - **Claude Code** reads its config dir (`~/.claude`, or `$CLAUDE_CONFIG_DIR`
@@ -77,7 +87,7 @@ tab. Ghostty 1.2 ships `cmd+1..9 = goto_tab` defaults; our config
 overrides them with the same `physical:` digit triggers, but if a digit
 chord still switches Ghostty tabs on your version, add explicit
 `keybind = cmd+physical:one=unbind` lines (one through nine) above the
-digit bindings in `ghostty/config`, then reload with `cmd+shift+,`.
+digit bindings in `.config/ghostty/config`, then reload with `cmd+shift+,`.
 
 ## Claude Code config
 
@@ -203,4 +213,4 @@ Three layers, each owning what it's best at:
    `⌘1–9` window select, `⌘⇧[`/`⌘⇧]` prev/next window, `⌘A` bare prefix.
    These only fire in Ghostty locally — over SSH from another terminal,
    fall back to the plain `C-a` bindings, which always work.
-3. **nvim** keymaps mirror LazyVim mnemonics (see `nvim/README.md`).
+3. **nvim** keymaps mirror LazyVim mnemonics (see `.config/nvim/README.md`).

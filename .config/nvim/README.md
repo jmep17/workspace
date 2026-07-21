@@ -2,7 +2,7 @@
 
 Hand-rolled Neovim config for full-stack work (TypeScript/React + Python).
 Built greenfield for ownership — every plugin here was a deliberate choice
-(decision records live in [`../docs/adr/`](../docs/adr/)).
+(decision records live in [`../../docs/adr/`](../../docs/adr/)).
 
 ## Requirements
 
@@ -12,11 +12,11 @@ Built greenfield for ownership — every plugin here was a deliberate choice
 
 ## Bootstrap
 
-This is the active config: `~/.config/nvim -> ~/src/workspace/nvim` (cutover
+This is the active config: `~/.config/nvim -> ~/src/workspace/.config/nvim` (cutover
 2026-07-16). On a fresh machine:
 
 ```fish
-ln -s ~/src/workspace/nvim ~/.config/nvim
+ln -s ~/src/workspace/.config/nvim ~/.config/nvim
 ```
 
 First launch installs plugins (lazy.nvim), then LSP servers/formatters/

@@ -1,5 +1,5 @@
 # Hand-rolled fish config — no framework, everything explicit.
-# Bootstrap: ln -s ~/src/workspace/fish ~/.config/fish
+# Bootstrap: ln -s ~/src/workspace/.config/fish ~/.config/fish
 # Reload with `exec fish`, or just open a new pane — every pane runs fish.
 #
 # How a shell gets here: Ghostty launches tmux (ghostty/config `command =`),
