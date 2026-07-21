@@ -16,10 +16,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     less \
     procps \
+    ripgrep \
     sudo \
+    tmux \
     unzip \
     zsh \
     && rm -rf /var/lib/apt/lists/*
+
+# Recent Neovim (bookworm's apt package is 0.7, too old for most configs).
+# Installed at build time, so the runtime firewall doesn't apply here.
+ARG NVIM_VERSION=v0.11.2
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) nvim_arch=x86_64 ;; \
+         arm64) nvim_arch=arm64 ;; \
+         *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-${nvim_arch}.tar.gz" \
+       | tar -xz -C /opt \
+    && ln -s "/opt/nvim-linux-${nvim_arch}/bin/nvim" /usr/local/bin/nvim
 
 # Persist shell history in the mounted volume
 RUN mkdir -p /commandhistory \

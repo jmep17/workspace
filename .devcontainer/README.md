@@ -31,6 +31,45 @@ npm, and GitHub need.
 To use this with another repository, copy the `.devcontainer/` directory there
 and adjust the Dockerfile for that project's toolchain.
 
+## CLI / Neovim usage (no VS Code)
+
+The `.devcontainer/` folder is editor-agnostic; the
+[devcontainer CLI](https://github.com/devcontainers/cli) builds and runs it from
+any terminal:
+
+```sh
+npm install -g @devcontainers/cli
+
+cd <this-repo>
+devcontainer up --workspace-folder .        # build + start (first run takes a few minutes)
+devcontainer exec --workspace-folder . zsh  # shell inside the container
+```
+
+Inside that shell, run `claude` and sign in. The browser callback usually can't
+reach a CLI-launched container — open the printed URL on your host and paste the
+code back into the terminal when prompted. Sign-in persists in the config
+volume, so this is one-time per project.
+
+Two ways to pair it with Neovim:
+
+1. **Host nvim, container Claude (recommended).** Keep editing in your normal
+   nvim on the host — the repo is bind-mounted, so edits appear on both sides
+   instantly. Run `claude` in a separate terminal via `devcontainer exec`. Your
+   editor setup stays untouched and Claude is still fully confined.
+2. **Everything inside.** The image ships with nvim 0.11, tmux, and ripgrep:
+   `devcontainer exec --workspace-folder . zsh`, then run nvim and `claude` in
+   tmux splits. For your own config, uncomment the `~/.config/nvim` bind mount
+   in `devcontainer.json` (plugin managers can fetch from GitHub — it's on the
+   firewall allowlist), or start plain.
+
+Housekeeping:
+
+```sh
+devcontainer up --workspace-folder . --remove-existing-container  # rebuild after config changes
+docker ps                                                         # the container keeps running until you stop it
+docker stop <container-id>
+```
+
 ## Keeping it isolated (the parts config can't do for you)
 
 - **Use a scoped git credential.** Don't mount `~/.ssh` or your global git
