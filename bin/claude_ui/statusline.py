@@ -158,24 +158,30 @@ def refresh_costs():
     exe = shutil.which("ccusage")
     # @latest so npx/bunx don't serve a stale cached copy — an old pricing
     # table silently prices new models at $0.
-    cmd = ([exe] if exe
-           else ["npx", "-y", "ccusage@latest"] if shutil.which("npx")
-           else ["bunx", "ccusage@latest"] if shutil.which("bunx") else None)
+    cmds = [[exe]] if exe else []
+    if shutil.which("npx"):
+        cmds.append(["npx", "-y", "ccusage@latest"])
+    if shutil.which("bunx"):
+        cmds.append(["bunx", "ccusage@latest"])
     data = {"ts": time.time()}
-    if cmd:
+    if cmds:
         since = min(month_start, week_start).strftime("%Y%m%d")
-        args = cmd + ["daily", "--json", "--since", since]
-        rows = None
         tz = local_tz()
-        if tz:
-            # Old ccusage releases predate --timezone; fall back to their
-            # default grouping rather than losing the numbers entirely.
-            try:
-                rows = ccusage_daily(args + ["--timezone", tz])
-            except Exception:
-                rows = None
+        rows = err = None
+        # Any runner can be broken independently (stale install, npm auth,
+        # missing --timezone support) — keep trying before giving up.
+        for cmd in cmds:
+            args = cmd + ["daily", "--json", "--since", since]
+            for a in ([args + ["--timezone", tz]] if tz else []) + [args]:
+                try:
+                    rows = ccusage_daily(a)
+                    break
+                except Exception as e:
+                    err = e
+            if rows is not None:
+                break
         if rows is None:
-            rows = ccusage_daily(args)
+            raise err
         t = w = m = 0.0
         for r in rows:
             try:
