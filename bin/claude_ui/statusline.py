@@ -39,11 +39,11 @@ STATUSLINE_FIELDS = [
     {"id": "cost", "label": "cost", "sample": "$0.42", "color": "orange",
      "desc": "session cost in USD"},
     {"id": "costtoday", "label": "cost today", "sample": "$4.20 today", "color": "orange",
-     "desc": "all sessions today — via ccusage, cached 5 min"},
+     "desc": "all sessions today — via ccusage, cached 5 min, ~ when stale"},
     {"id": "costweek", "label": "cost 7 days", "sample": "$28.10 wk", "color": "orange",
-     "desc": "last 7 days across sessions — via ccusage, cached 5 min"},
+     "desc": "last 7 days across sessions — via ccusage, cached 5 min, ~ when stale"},
     {"id": "costmonth", "label": "cost this month", "sample": "$132 mo", "color": "orange",
-     "desc": "calendar month across sessions — via ccusage, cached 5 min"},
+     "desc": "calendar month across sessions — via ccusage, cached 5 min, ~ when stale"},
     {"id": "duration", "label": "duration", "sample": "24m", "color": "gray",
      "desc": "wall-clock session duration"},
     {"id": "apitime", "label": "api time", "sample": "api 2.3s", "color": "gray",
@@ -137,18 +137,34 @@ def paint(name, s, bold=False):
 # refreshed by a detached background run — the status line itself never waits.
 CACHE = os.path.expanduser("~/.cache/claude-statusline-costs.json")
 
+def local_tz():
+    # ccusage groups days in its own default timezone; ours is date.today()'s.
+    # Passing the local IANA zone keeps both on the same day boundaries.
+    tz = os.environ.get("TZ", "").lstrip(":")
+    if "/" in tz:
+        return tz
+    path = os.path.realpath("/etc/localtime")
+    _, _, zone = path.partition("zoneinfo/")
+    return zone
+
 def refresh_costs():
     today = datetime.date.today()
     month_start = today.replace(day=1)
     week_start = today - datetime.timedelta(days=6)
     exe = shutil.which("ccusage")
+    # @latest so npx/bunx don't serve a stale cached copy — an old pricing
+    # table silently prices new models at $0.
     cmd = ([exe] if exe
-           else ["npx", "-y", "ccusage"] if shutil.which("npx")
-           else ["bunx", "ccusage"] if shutil.which("bunx") else None)
+           else ["npx", "-y", "ccusage@latest"] if shutil.which("npx")
+           else ["bunx", "ccusage@latest"] if shutil.which("bunx") else None)
     data = {"ts": time.time()}
     if cmd:
         since = min(month_start, week_start).strftime("%Y%m%d")
-        out = subprocess.run(cmd + ["daily", "--json", "--since", since],
+        args = ["daily", "--json", "--since", since]
+        tz = local_tz()
+        if tz:
+            args += ["--timezone", tz]
+        out = subprocess.run(cmd + args,
                              capture_output=True, text=True, timeout=300).stdout
         t = w = m = 0.0
         for r in json.loads(out).get("daily") or []:
@@ -308,7 +324,13 @@ def f_cost():
 def _fmt_cost(v, tag):
     if not isinstance(v, (int, float)):
         return ""
-    return "$" + (format(v, ".2f") if v < 100 else str(round(v))) + " " + tag
+    s = "$" + (format(v, ".2f") if v < 100 else str(round(v))) + " " + tag
+    # Refresh failures are silent (the cache just stops updating), so flag
+    # numbers well past the 5-minute refresh window instead of passing them
+    # off as current.
+    if time.time() - _costs().get("ts", 0) > 1800:
+        s = "~" + s
+    return s
 
 def f_costtoday():
     return _fmt_cost(_costs().get("today"), "today")
