@@ -14,6 +14,10 @@ set -gx VISUAL nvim
 # (/usr/local/bin on an Intel Mac — same caveat as the tmux/ghostty paths.)
 fish_add_path /opt/homebrew/bin /opt/homebrew/sbin
 
+# Claude VM (UTM) workflow: vm-in / vm-out in functions/ copy the current
+# repo into a credential-free guest and pull Claude's commits back as
+# patches. They ssh to the `claude-vm` alias; override with CLAUDE_VM.
+
 if status is-interactive
     # ── Interactive setup ────────────────────────────────────────────
     set -g fish_greeting ""    # no banner; the tmux status line is enough
