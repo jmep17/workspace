@@ -61,7 +61,9 @@ keybind = cmd+physical:nine=text:\x019
 # PATH; on an Intel Mac use /usr/local/bin/tmux instead.
 command = /opt/homebrew/bin/tmux new-session -A -s main
 
-# Ghostty auto-detects fish and injects shell integration.
+# Inside those panes tmux runs fish (fish/ in this repo, via tmux's
+# default-shell); Ghostty detects it and injects shell integration
+# through env vars that fish's vendor conf.d picks up inside tmux.
 shell-integration = detect
 shell-integration-features = cursor,sudo,title
 

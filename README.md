@@ -8,6 +8,7 @@ each symlinked into `~/.config`. Domain language lives in
 nvim/      Neovim config (see nvim/README.md for details)
 tmux/      tmux.conf — C-a prefix, vi copy mode, gruvbox status line
 ghostty/   Ghostty config — gruvbox theme, ⌘-key tmux bindings
+fish/      fish config — gruvbox colors/prompt; every tmux pane runs it
 skills/    Claude Code skills      → linked as <config dir>/skills
 commands/  Claude Code commands    → linked as <config dir>/commands
 agents/    Claude Code subagents   → linked as <config dir>/agents
@@ -37,6 +38,7 @@ git clone git@github.com:jmep17/workspace.git ~/src/workspace
 ln -s ~/src/workspace/nvim ~/.config/nvim
 ln -s ~/src/workspace/tmux ~/.config/tmux
 ln -s ~/src/workspace/ghostty ~/.config/ghostty
+ln -s ~/src/workspace/fish ~/.config/fish
 bin/claude-ui   # then click "link" on each Claude config mapping
 ```
 
@@ -50,6 +52,13 @@ move it aside first: `mv ~/.config/nvim ~/.config/nvim.bak`.
 - **Ghostty** reads `~/.config/ghostty/config` — reload with `cmd+shift+,`.
   Every window auto-attaches to the tmux session `main` (`command =` uses
   the Apple Silicon brew path; switch to `/usr/local/bin/tmux` on Intel).
+- **fish** reads `~/.config/fish/config.fish` — no `chsh` needed: tmux
+  launches fish directly (`default-shell` in `tmux.conf`), and Ghostty
+  launches tmux, so every pane lands in it. To make fish the login shell
+  anyway: `echo /opt/homebrew/bin/fish | sudo tee -a /etc/shells` then
+  `chsh -s /opt/homebrew/bin/fish`. `fish/fish_variables` (universal
+  variables) is machine state and gitignored — the config uses `set -g`
+  so the file in git stays the source of truth.
 - **Claude Code** reads its config dir (`~/.claude`, or `$CLAUDE_CONFIG_DIR`
   if exported) — claude-ui's links panel symlinks `skills`, `commands`,
   `agents`, `CLAUDE.md`, `settings.json`, and `keybindings.json` into it.
