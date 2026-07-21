@@ -62,6 +62,21 @@ Two ways to pair it with Neovim:
    in `devcontainer.json` (plugin managers can fetch from GitHub — it's on the
    firewall allowlist), or start plain.
 
+### With claude-switch
+
+If you use `bin/claude-switch` profiles, mark a profile container-only:
+
+```sh
+claude-switch container personal on
+```
+
+From then on `claude-switch run personal` (and the `claude-personal` shim)
+brings up the devcontainer of whatever repo you're in and runs claude inside
+it — and refuses to run uncontained if the repo has no `.devcontainer/`
+(escape hatch: `claude-switch run personal --no-container`). Auth in container
+mode lives in the container's config volume, not the host profile (macOS
+Keychain credentials can't cross the mount), so `/login` once per repo.
+
 Housekeeping:
 
 ```sh

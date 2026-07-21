@@ -15,9 +15,17 @@
 # env vars that would override it (ANTHROPIC_API_KEY outranks a
 # subscription login when exported).
 #
+# A profile can also be marked container-only: `run` then executes claude
+# inside the repo's devcontainer (.devcontainer/ at the repo root), so it
+# sees only the bind-mounted repo and the container's allowlisted network.
+# Auth in that mode lives in the container's ~/.claude volume, not the host
+# profile — subscription credentials sit in the macOS Keychain, which no
+# mount can carry across. /login once per repo, with the matching account.
+#
 # Usage:
 #   claude-switch add <name> --api-key|--subscription [--dir PATH]
-#   claude-switch run <name> [claude args...]
+#   claude-switch run <name> [--no-container] [claude args...]
+#   claude-switch container <name> on|off    run this profile in a devcontainer
 #   claude-switch env <name> [--fish]        eval/source to switch this shell
 #   claude-switch shim <name>                install a claude-<name> command
 #   claude-switch list
@@ -33,19 +41,20 @@ AUTH_VARS=(ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN)
 
 die() { printf 'claude-switch: %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
 
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; }
 
 conf_file() { printf '%s/%s.conf' "$ROOT" "$1"; }
 
-# Sets globals: profile_name, profile_dir, profile_auth
+# Sets globals: profile_name, profile_dir, profile_auth, profile_container
 load_profile() {
   profile_name=$1
   local conf; conf=$(conf_file "$1")
   [ -f "$conf" ] || die "no profile '$1' (see: claude-switch list)"
   profile_dir=$(sed -n 's/^config_dir=//p' "$conf")
   profile_auth=$(sed -n 's/^auth=//p' "$conf")
+  profile_container=$(sed -n 's/^container=//p' "$conf")
   [ -n "$profile_dir" ] && [ -n "$profile_auth" ] || die "corrupt profile file: $conf"
 }
 
@@ -166,9 +175,30 @@ cmd_env() {
   fi
 }
 
+# Walks up from $PWD to the nearest .devcontainer/devcontainer.json, brings
+# the container up (idempotent), and execs claude inside it. Host profile
+# env is deliberately NOT forwarded — the container volume is the config.
+run_in_devcontainer() {
+  local root=$PWD
+  while [ "$root" != / ] && [ ! -f "$root/.devcontainer/devcontainer.json" ]; do
+    root=$(dirname "$root")
+  done
+  [ -f "$root/.devcontainer/devcontainer.json" ] ||
+    die "profile '$profile_name' is container-only, but there is no .devcontainer/devcontainer.json at or above $PWD
+  (cd into a repo with a devcontainer, or bypass once with: claude-switch run $profile_name --no-container)"
+  command -v devcontainer >/dev/null ||
+    die "devcontainer CLI not found — npm install -g @devcontainers/cli"
+  docker info >/dev/null 2>&1 || die "docker isn't running"
+  echo "claude-switch: running in devcontainer at $root (auth = container volume, /login once per repo)" >&2
+  devcontainer up --workspace-folder "$root" >/dev/null || die "devcontainer up failed"
+  exec devcontainer exec --workspace-folder "$root" claude "$@"
+}
+
 cmd_run() {
-  [ $# -ge 1 ] || die "usage: claude-switch run <name> [claude args...]"
+  [ $# -ge 1 ] || die "usage: claude-switch run <name> [--no-container] [claude args...]"
   load_profile "$1"; shift
+  if [ "${1:-}" = --no-container ]; then shift; profile_container=""; fi
+  [ -n "$profile_container" ] && run_in_devcontainer "$@"
   command -v claude >/dev/null || die "'claude' not found on PATH"
   local unsets=()
   local v; for v in "${AUTH_VARS[@]}"; do unsets+=(-u "$v"); done
@@ -190,6 +220,23 @@ cmd_shim() {
   case ":$PATH:" in
     *":$bindir:"*) ;;
     *) echo "Note: $bindir is not on your PATH." ;;
+  esac
+}
+
+cmd_container() {
+  [ $# -eq 2 ] || die "usage: claude-switch container <name> on|off"
+  load_profile "$1"
+  local conf; conf=$(conf_file "$profile_name")
+  case $2 in
+    on)
+      grep -q '^container=' "$conf" || printf 'container=devcontainer\n' >> "$conf"
+      echo "Profile '$profile_name' now runs inside the repo's devcontainer."
+      echo "Needs docker + the devcontainer CLI (npm install -g @devcontainers/cli),"
+      echo "and a .devcontainer/ in the target repo. First run there: /login once." ;;
+    off)
+      sed -i.bak '/^container=/d' "$conf" && rm -f "$conf.bak"
+      echo "Profile '$profile_name' runs directly on the host again." ;;
+    *) die "usage: claude-switch container <name> on|off" ;;
   esac
 }
 
@@ -242,13 +289,14 @@ main() {
   [ $# -ge 1 ] || { usage; exit 1; }
   local cmd=$1; shift
   case $cmd in
-    add)      cmd_add "$@" ;;
-    env)      cmd_env "$@" ;;
-    run)      cmd_run "$@" ;;
-    shim)     cmd_shim "$@" ;;
-    list)     cmd_list "$@" ;;
-    current)  cmd_current "$@" ;;
-    remove)   cmd_remove "$@" ;;
+    add)       cmd_add "$@" ;;
+    env)       cmd_env "$@" ;;
+    run)       cmd_run "$@" ;;
+    container) cmd_container "$@" ;;
+    shim)      cmd_shim "$@" ;;
+    list)      cmd_list "$@" ;;
+    current)   cmd_current "$@" ;;
+    remove)    cmd_remove "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command '$cmd' (try: claude-switch --help)" ;;
   esac
