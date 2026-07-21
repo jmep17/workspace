@@ -147,6 +147,10 @@ def local_tz():
     _, _, zone = path.partition("zoneinfo/")
     return zone
 
+def ccusage_daily(argv):
+    out = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    return json.loads(out.stdout).get("daily") or []
+
 def refresh_costs():
     today = datetime.date.today()
     month_start = today.replace(day=1)
@@ -160,14 +164,20 @@ def refresh_costs():
     data = {"ts": time.time()}
     if cmd:
         since = min(month_start, week_start).strftime("%Y%m%d")
-        args = ["daily", "--json", "--since", since]
+        args = cmd + ["daily", "--json", "--since", since]
+        rows = None
         tz = local_tz()
         if tz:
-            args += ["--timezone", tz]
-        out = subprocess.run(cmd + args,
-                             capture_output=True, text=True, timeout=300).stdout
+            # Old ccusage releases predate --timezone; fall back to their
+            # default grouping rather than losing the numbers entirely.
+            try:
+                rows = ccusage_daily(args + ["--timezone", tz])
+            except Exception:
+                rows = None
+        if rows is None:
+            rows = ccusage_daily(args)
         t = w = m = 0.0
-        for r in json.loads(out).get("daily") or []:
+        for r in rows:
             try:
                 # "date" up to ccusage v17, renamed to "period" in later releases
                 day = datetime.date.fromisoformat(r.get("period") or r.get("date") or "")
