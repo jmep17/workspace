@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# claude-switch — one machine, many Claude Code accounts.
+#
+# Each profile is an isolated CLAUDE_CONFIG_DIR with its own credentials,
+# history, and settings. Two auth modes:
+#
+#   api-key       a Console API key (work). Stored in the macOS Keychain
+#                 (0600 file fallback elsewhere) and served to Claude Code
+#                 via an apiKeyHelper script in the profile's settings.json
+#                 — the key never sits in your shell environment.
+#   subscription  a claude.ai plan (personal Max). Plain config dir; run
+#                 `claude` in the profile once and /login as usual.
+#
+# Switching = pointing CLAUDE_CONFIG_DIR at the profile and clearing auth
+# env vars that would override it (ANTHROPIC_API_KEY outranks a
+# subscription login when exported).
+#
+# Usage:
+#   claude-switch add <name> --api-key|--subscription [--dir PATH]
+#   claude-switch run <name> [claude args...]
+#   claude-switch env <name> [--fish]        eval/source to switch this shell
+#   claude-switch shim <name>                install a claude-<name> command
+#   claude-switch list
+#   claude-switch current
+#   claude-switch remove <name>
+#
+# State lives in ~/.claude-profiles (override with CLAUDE_SWITCH_HOME):
+# a <name>.conf per profile plus the managed config dirs.
+set -euo pipefail
+
+ROOT="${CLAUDE_SWITCH_HOME:-$HOME/.claude-profiles}"
+AUTH_VARS=(ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN)
+
+die() { printf 'claude-switch: %s\n' "$*" >&2; exit 1; }
+
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; }
+
+conf_file() { printf '%s/%s.conf' "$ROOT" "$1"; }
+
+# Sets globals: profile_name, profile_dir, profile_auth
+load_profile() {
+  profile_name=$1
+  local conf; conf=$(conf_file "$1")
+  [ -f "$conf" ] || die "no profile '$1' (see: claude-switch list)"
+  profile_dir=$(sed -n 's/^config_dir=//p' "$conf")
+  profile_auth=$(sed -n 's/^auth=//p' "$conf")
+  [ -n "$profile_dir" ] && [ -n "$profile_auth" ] || die "corrupt profile file: $conf"
+}
+
+have_keychain() { [ "$(uname)" = Darwin ] && command -v security >/dev/null; }
+
+keychain_service() { printf 'claude-switch.%s' "$1"; }
+
+# merge_settings FILE key=value...  (creates FILE; refuses symlinks)
+merge_settings() {
+  local file=$1; shift
+  if [ -L "$file" ]; then
+    printf 'claude-switch: %s is a symlink (shared settings?) — not writing %s\n' "$file" "$*" >&2
+    printf 'claude-switch: add these keys to the link target yourself, or unlink first.\n' >&2
+    return 0
+  fi
+  python3 - "$file" "$@" <<'PY'
+import json, os, sys
+path, updates = sys.argv[1], dict(kv.split("=", 1) for kv in sys.argv[2:])
+data = {}
+if os.path.exists(path):
+    with open(path) as f:
+        data = json.load(f)
+data.update(updates)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+}
+
+store_api_key() {  # store_api_key <name> <dir> <key> ; echoes helper command
+  local name=$1 dir=$2 key=$3
+  if have_keychain; then
+    security add-generic-password -U -s "$(keychain_service "$name")" -a "$USER" -w "$key" ||
+      die "could not write the key to the Keychain"
+    printf 'exec security find-generic-password -s %s -a "$USER" -w' "$(keychain_service "$name")"
+  else
+    (umask 077 && printf '%s\n' "$key" > "$dir/.api-key")
+    printf 'exec cat %q' "$dir/.api-key"
+  fi
+}
+
+cmd_add() {
+  local name="" mode="" dir=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --api-key) mode=api-key ;;
+      --subscription) mode=subscription ;;
+      --dir) shift; dir=${1:?--dir needs a path} ;;
+      -*) die "unknown flag for add: $1" ;;
+      *) [ -z "$name" ] || die "add takes one profile name"; name=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || die "usage: claude-switch add <name> --api-key|--subscription [--dir PATH]"
+  valid_name "$name" || die "profile names are letters, digits, - and _"
+  [ -n "$mode" ] || die "pick an auth mode: --api-key (work/Console) or --subscription (Max)"
+  [ -f "$(conf_file "$name")" ] && die "profile '$name' already exists (remove it first to redo)"
+
+  dir=${dir:-$ROOT/$name}
+  dir=$(python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$dir")
+  mkdir -p "$ROOT" "$dir"
+  chmod 700 "$dir"
+
+  if [ "$mode" = api-key ]; then
+    local key=""
+    if [ -t 0 ]; then
+      read -rs -p "Anthropic API key for '$name' (input hidden): " key; echo >&2
+    else
+      read -r key
+    fi
+    [ -n "$key" ] || die "no key given"
+    local helper_cmd helper="$dir/api-key-helper"
+    helper_cmd=$(store_api_key "$name" "$dir" "$key")
+    printf '#!/bin/sh\n%s\n' "$helper_cmd" > "$helper"
+    chmod 700 "$helper"
+    merge_settings "$dir/settings.json" "apiKeyHelper=$helper" "forceLoginMethod=console"
+  else
+    merge_settings "$dir/settings.json" "forceLoginMethod=claudeai"
+  fi
+
+  (umask 077 && printf 'auth=%s\nconfig_dir=%s\n' "$mode" "$dir" > "$(conf_file "$name")")
+
+  echo "Profile '$name' ($mode) -> $dir"
+  case $mode in
+    subscription)
+      if [ -e "$dir/.credentials.json" ] || { have_keychain && [ "$dir" = "$HOME/.claude" ]; }; then
+        echo "Existing login state found — you're probably already signed in."
+      else
+        echo "Next: claude-switch run $name   # then /login with your personal account"
+      fi ;;
+    api-key)
+      echo "Next: claude-switch run $name   # billed to the API key, no login needed" ;;
+  esac
+}
+
+cmd_env() {
+  local fish=0 name=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --fish) fish=1 ;;
+      -*) die "unknown flag for env: $1" ;;
+      *) name=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || die "usage: claude-switch env <name> [--fish]"
+  load_profile "$name"
+  local v
+  if [ "$fish" = 1 ]; then
+    printf "set -gx CLAUDE_CONFIG_DIR '%s'\n" "$profile_dir"
+    printf "set -gx CLAUDE_SWITCH_PROFILE '%s'\n" "$profile_name"
+    for v in "${AUTH_VARS[@]}"; do printf 'set -eg %s 2>/dev/null\n' "$v"; done
+    printf 'true\n'
+  else
+    printf "export CLAUDE_CONFIG_DIR='%s'\n" "$profile_dir"
+    printf "export CLAUDE_SWITCH_PROFILE='%s'\n" "$profile_name"
+    printf 'unset %s\n' "${AUTH_VARS[*]}"
+  fi
+}
+
+cmd_run() {
+  [ $# -ge 1 ] || die "usage: claude-switch run <name> [claude args...]"
+  load_profile "$1"; shift
+  command -v claude >/dev/null || die "'claude' not found on PATH"
+  local unsets=()
+  local v; for v in "${AUTH_VARS[@]}"; do unsets+=(-u "$v"); done
+  exec env "${unsets[@]}" \
+    CLAUDE_CONFIG_DIR="$profile_dir" CLAUDE_SWITCH_PROFILE="$profile_name" \
+    claude "$@"
+}
+
+cmd_shim() {
+  [ $# -eq 1 ] || die "usage: claude-switch shim <name>"
+  load_profile "$1"
+  local self bindir="$HOME/.local/bin" shim
+  self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+  mkdir -p "$bindir"
+  shim="$bindir/claude-$profile_name"
+  printf '#!/bin/sh\nexec %q run %q "$@"\n' "$self" "$profile_name" > "$shim"
+  chmod 755 "$shim"
+  echo "Installed $shim"
+  case ":$PATH:" in
+    *":$bindir:"*) ;;
+    *) echo "Note: $bindir is not on your PATH." ;;
+  esac
+}
+
+cmd_list() {
+  local conf found=0
+  for conf in "$ROOT"/*.conf; do
+    [ -e "$conf" ] || continue
+    found=1
+    local name dir auth mark=" "
+    name=$(basename "$conf" .conf)
+    dir=$(sed -n 's/^config_dir=//p' "$conf")
+    auth=$(sed -n 's/^auth=//p' "$conf")
+    if [ "${CLAUDE_SWITCH_PROFILE:-}" = "$name" ] ||
+       [ "${CLAUDE_CONFIG_DIR:-}" = "$dir" ]; then mark="*"; fi
+    printf '%s %-14s %-12s %s\n' "$mark" "$name" "$auth" "$dir"
+  done
+  [ "$found" = 1 ] || echo "No profiles yet. Try: claude-switch add work --api-key"
+}
+
+cmd_current() {
+  if [ -n "${CLAUDE_SWITCH_PROFILE:-}" ]; then
+    echo "$CLAUDE_SWITCH_PROFILE"
+  elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    echo "none (CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR set by hand)"
+  else
+    echo "none (default ~/.claude)"
+  fi
+}
+
+cmd_remove() {
+  [ $# -eq 1 ] || die "usage: claude-switch remove <name>"
+  load_profile "$1"
+  if [ -t 0 ]; then
+    local reply
+    read -r -p "Remove profile '$profile_name' ($profile_dir)? [y/N] " reply
+    case $reply in [yY]*) ;; *) echo "Aborted."; exit 1 ;; esac
+  fi
+  if have_keychain; then
+    security delete-generic-password -s "$(keychain_service "$profile_name")" -a "$USER" >/dev/null 2>&1 || true
+  fi
+  case $profile_dir in
+    "$ROOT"/*) rm -rf "$profile_dir" ;;
+    *) echo "Keeping $profile_dir (not managed by claude-switch)." ;;
+  esac
+  rm -f "$(conf_file "$profile_name")"
+  echo "Removed profile '$profile_name'."
+}
+
+main() {
+  [ $# -ge 1 ] || { usage; exit 1; }
+  local cmd=$1; shift
+  case $cmd in
+    add)      cmd_add "$@" ;;
+    env)      cmd_env "$@" ;;
+    run)      cmd_run "$@" ;;
+    shim)     cmd_shim "$@" ;;
+    list)     cmd_list "$@" ;;
+    current)  cmd_current "$@" ;;
+    remove)   cmd_remove "$@" ;;
+    -h|--help|help) usage ;;
+    *) die "unknown command '$cmd' (try: claude-switch --help)" ;;
+  esac
+}
+
+main "$@"

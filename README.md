@@ -17,6 +17,7 @@ agents/    Claude Code subagents   → linked as <config dir>/agents
 claude/    CLAUDE.md, settings.json, keybindings.json → linked as files
 archive/   Retired skills/commands/agents — in git, not loaded
 bin/       claude-ui — local web UI managing all of the above
+           claude-switch — switch between work/personal Claude accounts
 ```
 
 ## Fresh machine setup
@@ -201,6 +202,42 @@ Set values are badged and clearable; keys not in the schema are still
 editable as raw JSON; unknown values never get clobbered. Changes write
 straight to the file (created on first set), so they take effect once
 `settings.json` is linked.
+
+### claude-switch (account switcher)
+
+`bin/claude-switch` (bash, no deps) switches between Claude Code accounts —
+e.g. the work-provided **API key** and the personal **Max subscription**.
+Each profile is an isolated `CLAUDE_CONFIG_DIR` with its own credentials,
+history, and settings, so the two never cross-bill: an exported
+`ANTHROPIC_API_KEY` silently outranks a subscription login, which is exactly
+the leak switching by hand invites.
+
+```fish
+claude-switch add work --api-key            # key -> Keychain, prompted hidden
+claude-switch add personal --subscription --dir ~/.claude   # adopt existing login
+claude-switch run work [args…]              # one-off session, any shell
+claude-switch shim personal                 # installs a `claude-personal` command
+claude-switch list                          # * marks the active profile
+```
+
+API-key profiles never export the key: it lives in the macOS Keychain
+(0600 file elsewhere) and reaches Claude Code through an `apiKeyHelper`
+script in the profile's `settings.json` (with `forceLoginMethod` set as a
+guard, `console` vs `claudeai`). Subscription profiles just `/login` once.
+To switch the *current shell* rather than launch, eval the env output —
+fish users can drop this in `functions/cs.fish`:
+
+```fish
+function cs --description "switch Claude Code account"
+    ~/src/workspace/bin/claude-switch env $argv[1] --fish | source
+end
+```
+
+Profiles live under `~/.claude-profiles/` (`CLAUDE_SWITCH_HOME` overrides).
+Point claude-ui's links panel at a profile dir to share skills/commands
+with it — but leave an api-key profile's `settings.json` unlinked (it
+carries the `apiKeyHelper`; `add` refuses to write through a symlink).
+Spec and known limits: `.scratch/claude-account-switcher/spec.md`.
 
 ## Keybinding model
 
