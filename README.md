@@ -17,8 +17,14 @@ agents/    Claude Code subagents   → linked as <config dir>/agents
 claude/    CLAUDE.md, settings.json, keybindings.json → linked as files
 archive/   Retired skills/commands/agents — in git, not loaded
 bin/       claude-ui — local web UI managing all of the above
-           claude-switch — switch between work/personal Claude accounts
+           claude-switch — switch between work/personal Claude accounts,
+           with a per-profile devcontainer mode
+.devcontainer/  isolated Claude Code environment (egress-firewalled)
 ```
+
+Running the personal Claude sub in isolation — devcontainer, or a
+credential-free UTM VM via the fish `vm-in`/`vm-out` functions — is
+documented in [`docs/claude-isolation.md`](docs/claude-isolation.md).
 
 ## Fresh machine setup
 
