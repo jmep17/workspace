@@ -36,8 +36,14 @@ STATUSLINE_FIELDS = [
      "desc": "tokens in the context window (in/out)"},
     {"id": "lastcall", "label": "last call", "sample": "8.5k→1.2k ⚡2k", "color": "aqua",
      "desc": "last API call tokens (⚡ = cache read)"},
+    {"id": "cachehit", "label": "cache hit", "sample": "cache 87%", "color": "aqua",
+     "desc": "share of last call's input read from cache"},
+    {"id": "cachetok", "label": "cache tokens", "sample": "⚡42k +5.2k", "color": "aqua",
+     "desc": "last call cache reads (⚡) and writes (+)"},
     {"id": "cost", "label": "cost", "sample": "$0.42", "color": "orange",
      "desc": "session cost in USD"},
+    {"id": "costhour", "label": "burn rate", "sample": "$1.80/h", "color": "orange",
+     "desc": "session cost per hour of wall clock"},
     {"id": "costtoday", "label": "cost today", "sample": "$4.20 today", "color": "orange",
      "desc": "all sessions today — via ccusage, cached 5 min, ~ when stale"},
     {"id": "costweek", "label": "cost 7 days", "sample": "$28.10 wk", "color": "orange",
@@ -54,6 +60,8 @@ STATUSLINE_FIELDS = [
      "desc": "reasoning effort level"},
     {"id": "thinking", "label": "thinking", "sample": "think", "color": "purple",
      "desc": "shown when extended thinking is on"},
+    {"id": "fastmode", "label": "fast mode", "sample": "fast", "color": "yellow",
+     "desc": "shown when fast mode is on"},
     {"id": "vim", "label": "vim mode", "sample": "NORMAL", "color": "green",
      "desc": "vim mode (when enabled)"},
     {"id": "rate5h", "label": "5h rate limit", "sample": "5h 24%", "color": "red",
@@ -86,11 +94,12 @@ STATUSLINE_FIELDS = [
 
 # palette grouping in the UI
 _STL_CATS = {
-    "model": ("model", "modelid", "effort", "thinking"),
+    "model": ("model", "modelid", "effort", "thinking", "fastmode"),
     "workspace": ("dir", "project", "addeddirs"),
     "git": ("repo", "branch", "worktree", "pr"),
-    "context": ("context", "ctxused", "ctxsize", "tokens", "lastcall"),
-    "cost & time": ("cost", "costtoday", "costweek", "costmonth",
+    "context": ("context", "ctxused", "ctxsize", "tokens", "lastcall",
+                "cachehit", "cachetok"),
+    "cost & time": ("cost", "costhour", "costtoday", "costweek", "costmonth",
                     "duration", "apitime", "lines"),
     "limits": ("rate5h", "rate7d", "reset5h", "reset7d"),
     "session": ("session", "sessionid", "agent", "vim", "style", "version"),
@@ -333,9 +342,36 @@ def f_lastcall():
         s += " \\u26a1" + kfmt(int(cr))
     return s
 
+def f_cachehit():
+    cu = cw.get("current_usage") or {}
+    total = sum(int(cu.get(k) or 0) for k in
+                ("input_tokens", "cache_creation_input_tokens",
+                 "cache_read_input_tokens"))
+    if not total:
+        return ""
+    cr = int(cu.get("cache_read_input_tokens") or 0)
+    return "cache " + str(round(100 * cr / total)) + "%"
+
+def f_cachetok():
+    cu = cw.get("current_usage") or {}
+    cr = int(cu.get("cache_read_input_tokens") or 0)
+    cc = int(cu.get("cache_creation_input_tokens") or 0)
+    if not cr and not cc:
+        return ""
+    return " ".join((["\\u26a1" + kfmt(cr)] if cr else [])
+                    + (["+" + kfmt(cc)] if cc else []))
+
 def f_cost():
     c = cost.get("total_cost_usd")
     return "$" + format(c, ".2f") if isinstance(c, (int, float)) else ""
+
+def f_costhour():
+    c, ms = cost.get("total_cost_usd"), cost.get("total_duration_ms")
+    # under a minute of wall clock the extrapolation is meaningless
+    if not isinstance(c, (int, float)) or not isinstance(ms, (int, float)) \\
+            or ms < 60000:
+        return ""
+    return "$" + format(c * 3600000 / ms, ".2f") + "/h"
 
 def _fmt_cost(v, tag):
     if not isinstance(v, (int, float)):
@@ -384,6 +420,9 @@ def f_effort():
 
 def f_thinking():
     return "think" if (d.get("thinking") or {}).get("enabled") else ""
+
+def f_fastmode():
+    return "fast" if d.get("fast_mode") else ""
 
 def f_vim():
     return (d.get("vim") or {}).get("mode", "")
@@ -440,12 +479,15 @@ FIELDS = {"model": (f_model, "yellow"), "modelid": (f_modelid, "gray"),
           "branch": (f_branch, "green"), "worktree": (f_worktree, "green"),
           "context": (f_context, "aqua"), "ctxused": (f_ctxused, "aqua"),
           "ctxsize": (f_ctxsize, "aqua"), "tokens": (f_tokens, "aqua"),
-          "lastcall": (f_lastcall, "aqua"), "cost": (f_cost, "orange"),
+          "lastcall": (f_lastcall, "aqua"), "cachehit": (f_cachehit, "aqua"),
+          "cachetok": (f_cachetok, "aqua"), "cost": (f_cost, "orange"),
+          "costhour": (f_costhour, "orange"),
           "costtoday": (f_costtoday, "orange"), "costweek": (f_costweek, "orange"),
           "costmonth": (f_costmonth, "orange"),
           "duration": (f_duration, "gray"), "apitime": (f_apitime, "gray"),
           "lines": (f_lines, "orange"),
           "effort": (f_effort, "purple"), "thinking": (f_thinking, "purple"),
+          "fastmode": (f_fastmode, "yellow"),
           "vim": (f_vim, "green"), "rate5h": (f_rate5h, "red"),
           "rate7d": (f_rate7d, "red"), "reset5h": (f_reset5h, "red"),
           "reset7d": (f_reset7d, "red"), "session": (f_session, "yellow"),
