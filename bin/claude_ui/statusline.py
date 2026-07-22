@@ -593,3 +593,21 @@ def statusline_save(config, apply):
         if refresh:
             sl["refreshInterval"] = refresh
         settings_set("statusLine", sl)
+
+def statusline_apply(config=None):
+    """Install the statusline as a setup piece: generate the script and point
+    settings at it. Uses the saved config, else the default field selection."""
+    if config is None:
+        config, _ = _read_json_object(statusline_paths()[0])
+        if not config:
+            config = STATUSLINE_DEFAULT
+    statusline_save(config, apply=True)
+
+def statusline_remove():
+    """Uninstall the statusline piece: drop the generated script and clear the
+    settings key. The saved config json is left so a re-apply restores fields."""
+    cfgp, scriptp = statusline_paths()
+    scriptp.unlink(missing_ok=True)
+    sl = settings_state()["data"].get("statusLine")
+    if isinstance(sl, dict) and sl.get("command") in (tilde(scriptp), str(scriptp)):
+        settings_set("statusLine", None)

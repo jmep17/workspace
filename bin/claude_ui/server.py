@@ -15,6 +15,7 @@ from .items import config_files_state, item_read, item_save, scan_items, set_ena
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from .settings import SETTINGS_SCHEMA, file_read, file_save, hook_test, settings_set, settings_state
 from .statusline import statusline_save, statusline_state
+from .setup import setup_apply, setup_remove, setup_state
 from .insight import cost_stats, insight_budget, usage_stats
 from .assist import assist
 from .doctor import doctor
@@ -113,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, cost_stats(rescan="rescan" in self.path))
         elif self.path == "/api/doctor":
             self.send(200, doctor())
+        elif self.path == "/api/setup":
+            self.send(200, setup_state())
         else:
             self.send(404, {"error": "not found"})
 
@@ -146,6 +149,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, hook_test(req.get("command", ""), req.get("event", "")))
             elif action == "statusline-save":
                 statusline_save(req.get("config"), bool(req.get("apply")))
+                self.send(200, {"ok": True})
+            elif action == "setup-apply":
+                setup_apply(req.get("id", ""))
+                self.send(200, {"ok": True})
+            elif action == "setup-remove":
+                setup_remove(req.get("id", ""))
                 self.send(200, {"ok": True})
             elif action == "mcp-save":
                 mcp_machine_set(req.get("name", ""), req.get("config"),

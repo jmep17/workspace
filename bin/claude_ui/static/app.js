@@ -1,6 +1,6 @@
 let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
-const TABS = [...ITEM_TABS, "mcp", "statusline", "settings", "insight", "costs", "doctor"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor"];
 let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "skills";
 let IQ = "";  // inventory filter
 
@@ -619,6 +619,62 @@ async function mcpToggle(name, enabled) {
     toast(name + (enabled ? " enabled" : " disabled — parked in disabled/mcp-servers.json") +
       " · applies to new sessions");
     await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+let SETUP = null;
+
+async function renderSetup(reload) {
+  const el = document.getElementById("setupview");
+  if (!SETUP || reload) {
+    if (!SETUP) el.innerHTML = '<div class="empty">checking setup pieces…</div>';
+    try { SETUP = await api("/api/setup"); }
+    catch (e) { el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>"; return; }
+    if (TAB !== "setup") return;
+  }
+  el.innerHTML =
+    '<div class="sethead">Installable pieces of environment setup. Applying a ' +
+    'piece <b>patches your existing setup in place</b> — it never replaces your ' +
+    'files. Whether a piece is installed is derived by looking, not recorded; ' +
+    'removing touches only that piece’s own artifacts.</div>';
+  for (const p of SETUP.pieces) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML =
+      `<span class="name">${esc(p.label)}</span>` +
+      (p.installed ? '<span class="badge ok">installed</span>'
+                   : '<span class="badge link">not installed</span>') +
+      `<span class="desc">${esc(p.desc)}${p.detail ? " — " + esc(p.detail) : ""}</span>`;
+    const act = document.createElement("span");
+    act.className = "actions";
+    const btn = (label, fn, cls) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      if (cls) b.className = cls;
+      b.onclick = fn;
+      act.appendChild(b);
+    };
+    btn(p.installed ? "re-apply" : "apply", () => setupAct("apply", p),
+        "small primary");
+    if (p.removable && p.installed)
+      btn("remove", () => setupAct("remove", p), "small danger");
+    row.appendChild(act);
+    el.appendChild(row);
+  }
+}
+
+async function setupAct(action, p) {
+  if (action === "remove" &&
+      !(await mconfirm("remove " + p.label,
+        "Removes only this piece's own artifacts (" + (p.target || "its files") +
+        ") and clears the setting it set. Your own config is left as-is.", "remove")))
+    return;
+  try {
+    await api("/api/setup-" + action, { id: p.id });
+    toast(p.label + (action === "apply" ? " applied" : " removed") +
+      " · applies to new sessions");
+    await refresh();
+    renderSetup(true);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1485,6 +1541,8 @@ function palItems() {
   out.push({ kind: "action", label: "toggle light/dark theme", run: toggleTheme });
   out.push({ kind: "action", label: "run doctor",
     run: () => { TAB = "doctor"; location.hash = TAB; render(); renderDoctor(true); } });
+  out.push({ kind: "action", label: "setup pieces",
+    run: () => { TAB = "setup"; location.hash = TAB; render(); renderSetup(true); } });
   out.push({ kind: "action", label: "rescan usage analytics",
     run: () => { TAB = "insight"; location.hash = TAB; render(); renderInsight(true); } });
   return out;
@@ -1876,7 +1934,7 @@ function render() {
   renderHeader();
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
-    insight: "insightview", costs: "costsview", doctor: "doctorview" };
+    setup: "setupview", insight: "insightview", costs: "costsview", doctor: "doctorview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   document.getElementById("itemsview").hidden = isEditor || !ITEM_TABS.includes(TAB);
@@ -1891,6 +1949,7 @@ function render() {
   if (TAB === "settings") { renderSettings(); return; }
   if (TAB === "mcp") { renderMcp(); return; }
   if (TAB === "statusline") { renderStatusline(); return; }
+  if (TAB === "setup") { renderSetup(); return; }
   if (TAB === "insight") { renderInsight(); return; }
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
