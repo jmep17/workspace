@@ -1,0 +1,32 @@
+# The doorman lab, fully containerized (lesson 0002, Docker variant).
+#
+# Only the doorman publishes a port to the host. The branches have no
+# published ports at all — they are reachable *only* through the front door.
+services:
+  doorman:
+    image: caddy:2
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+    depends_on:
+      - stable
+      - feature
+
+  stable:
+    image: node:24-alpine
+    environment:
+      BRANCH_NAME: "stable branch"
+      PORT: "3101"
+    volumes:
+      - ./server.js:/server.js:ro
+    command: node /server.js
+
+  feature:
+    image: node:24-alpine
+    environment:
+      BRANCH_NAME: "feature branch"
+      PORT: "3102"
+    volumes:
+      - ./server.js:/server.js:ro
+    command: node /server.js

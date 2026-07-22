@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caddyfile Cheat-Sheet — Many Branches, One Port</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<article>
+  <h1>Caddyfile cheat-sheet</h1>
+  <p class="subtitle">Only what this course uses. Full docs:
+  <a href="https://caddyserver.com/docs/caddyfile">caddyserver.com/docs/caddyfile</a></p>
+
+  <h2>The doorman pattern</h2>
+  <pre><code># Caddyfile
+http://localhost:3000     # site address — explicit http:// or Caddy auto-serves HTTPS
+
+reverse_proxy :3101       # upstream: the branch that is currently "live"</code></pre>
+
+  <h2>Run · reload · inspect</h2>
+  <pre><code>caddy run --config Caddyfile      # foreground; Ctrl-C stops
+caddy reload --config Caddyfile   # hot-swap config, zero downtime
+caddy validate --config Caddyfile # syntax check without running
+
+lsof -nP -iTCP:3000 -sTCP:LISTEN  # who owns the front door?</code></pre>
+
+  <h2>Equivalent one-liner (no Caddyfile)</h2>
+  <pre><code>caddy reverse-proxy --from :3000 --to :3101
+# bare :3000 (no hostname) also stays plain HTTP</code></pre>
+
+  <h2>Headers the proxy adds to the copied request</h2>
+  <pre><code>Host: localhost:3000        # passed through unchanged
+X-Forwarded-For: 127.0.0.1  # the real client's address
+X-Forwarded-Proto: http     # the scheme the browser used</code></pre>
+
+  <h2>Docker variant</h2>
+  <pre><code>docker compose up                 # from labs/doorman-docker/
+docker compose exec doorman caddy reload --config /etc/caddy/Caddyfile
+docker compose down</code></pre>
+  <ul>
+    <li>Upstreams by <strong>service name</strong> (<code>stable:3101</code>) — in-container
+      <code>localhost</code> is the container itself.</li>
+    <li>Host processes are reached as <code>host.docker.internal:PORT</code>.</li>
+    <li>Publish the front door on loopback only: <code>"127.0.0.1:3000:3000"</code>.</li>
+  </ul>
+
+  <h2>Gotchas (each learned in a lesson)</h2>
+  <ul>
+    <li><strong>Bare hostname ⇒ automatic HTTPS.</strong> <code>localhost:3000</code> as a site
+      address serves TLS; the scheme then fails exact-match validation.
+      (<a href="../lessons/0002-the-doorman.html">Lesson 0002</a>,
+      <a href="https://caddyserver.com/docs/automatic-https">docs</a>)</li>
+    <li><strong>One listener per (address, port).</strong> Stop any dev server squatting on 3000
+      before <code>caddy run</code>, or you'll get the lesson-1 error: <code>EADDRINUSE</code>.
+      (<a href="../lessons/0001-one-port-one-listener.html">Lesson 0001</a>)</li>
+    <li><strong><code>reload</code> needs the admin endpoint.</strong> It talks to the running
+      Caddy on <code>localhost:2019</code> — so it only works while <code>caddy run</code> is up.</li>
+  </ul>
+
+  <footer>
+    <p>Part of <em>Many Branches, One Port</em>. See also the
+    <a href="glossary.html">glossary</a>.</p>
+  </footer>
+</article>
+<script src="../assets/copy.js"></script>
+</body>
+</html>

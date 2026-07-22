@@ -1,0 +1,198 @@
+/* Shared stylesheet for the "Many branches, one port" course.
+   Tufte-inspired: generous margins, sidenotes, restrained palette, prints well. */
+
+:root {
+  --ink: #111;
+  --paper: #fffff8;
+  --accent: #a00000;
+  --rule: #ccc;
+  --code-bg: #f4f4ec;
+  --good: #1a7f37;
+  --bad: #b42318;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 17px; }
+
+body {
+  font-family: Palatino, "Palatino Linotype", Georgia, serif;
+  background: var(--paper);
+  color: var(--ink);
+  line-height: 1.55;
+  margin: 0;
+  padding: 3rem 1.5rem 5rem;
+}
+
+article {
+  max-width: 42rem;
+  margin: 0 auto;
+}
+
+h1 {
+  font-weight: 400;
+  font-size: 2.1rem;
+  font-style: italic;
+  margin: 0 0 0.3rem;
+}
+
+h2 {
+  font-weight: 400;
+  font-style: italic;
+  font-size: 1.45rem;
+  margin-top: 2.4rem;
+  border-top: 1px solid var(--rule);
+  padding-top: 1.2rem;
+}
+
+.subtitle {
+  font-style: italic;
+  color: #555;
+  margin-bottom: 2.2rem;
+}
+
+.mission-tie {
+  border-left: 3px solid var(--accent);
+  padding: 0.4rem 1rem;
+  font-style: italic;
+  color: #444;
+  background: rgba(160, 0, 0, 0.04);
+  margin: 1.5rem 0;
+}
+
+a { color: var(--accent); text-decoration-thickness: 1px; }
+a:hover { text-decoration: none; }
+
+code, pre {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.82em;
+}
+
+code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; }
+
+pre {
+  background: var(--code-bg);
+  padding: 0.9rem 1.1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+pre code { background: none; padding: 0; }
+
+.sidenote {
+  display: block;
+  float: right;
+  clear: right;
+  width: 15rem;
+  margin-right: -17rem;
+  margin-top: 0.3rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #555;
+}
+
+@media (max-width: 78rem) {
+  .sidenote {
+    float: none;
+    width: auto;
+    margin: 0.8rem 0;
+    padding: 0.5rem 1rem;
+    border-left: 2px solid var(--rule);
+  }
+}
+
+.try-it {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.3rem;
+  margin: 1.6rem 0;
+}
+.try-it > h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.key-idea {
+  font-size: 1.15rem;
+  font-style: italic;
+  text-align: center;
+  margin: 2.2rem 2rem;
+}
+
+footer {
+  margin-top: 3.5rem;
+  border-top: 1px solid var(--rule);
+  padding-top: 1.2rem;
+  font-size: 0.88rem;
+  color: #555;
+}
+
+/* ---- Quiz widget (rendered by quiz.js) ---- */
+
+.quiz { margin: 1.8rem 0; }
+
+.quiz-q {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.3rem;
+  margin-bottom: 1.1rem;
+}
+.quiz-q p.stem { margin-top: 0; font-weight: 600; }
+
+.quiz-q button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 0.95rem;
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 0.5rem 0.8rem;
+  margin: 0.4rem 0;
+  cursor: pointer;
+}
+.quiz-q button:hover:not(:disabled) { border-color: var(--ink); }
+.quiz-q button:disabled { cursor: default; opacity: 0.75; }
+.quiz-q button.correct { border-color: var(--good); background: #e6f4ea; opacity: 1; }
+.quiz-q button.incorrect { border-color: var(--bad); background: #fdecea; }
+
+.quiz-q .explain {
+  font-size: 0.88rem;
+  color: #444;
+  border-top: 1px dashed var(--rule);
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+}
+
+.quiz-score { font-style: italic; color: #555; }
+
+/* ---- Copy button (attached by copy.js) ---- */
+
+.copy-btn {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  font-family: inherit;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper);
+  color: #555;
+  cursor: pointer;
+  opacity: 0.35;
+  transition: opacity 0.15s;
+}
+pre:hover .copy-btn, .copy-btn:focus { opacity: 1; }
+.copy-btn:hover { border-color: var(--ink); color: var(--ink); }
+
+@media print {
+  body { padding: 0; }
+  .quiz, .no-print { display: none; }
+  a { color: var(--ink); }
+}

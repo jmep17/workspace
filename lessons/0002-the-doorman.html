@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 — The Doorman</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<article>
+  <h1>The doorman</h1>
+  <p class="subtitle">Lesson 0002 · Many Branches, One Port · ~15 minutes, hands-on</p>
+
+  <p class="mission-tie">Mission check: lesson <a href="0001-one-port-one-listener.html">0001</a>
+  ended with a claim — the process at <code>localhost:3000</code> doesn't have to be a branch, it
+  can be a doorman. Today you build that doorman and swap branches behind it while the
+  browser-visible origin never changes. By the end you'll have the "stable branch + instant
+  switch" half of your mission working in miniature.</p>
+
+  <h2>Warm-up: retrieve before you build</h2>
+  <p>From memory, before reading on — this is what makes lesson 1 stick.</p>
+  <div class="quiz" id="warmup"></div>
+
+  <h2>What a reverse proxy actually does</h2>
+
+  <p>A <a href="../reference/glossary.html#reverse-proxy">reverse proxy</a> is an ordinary HTTP
+  server that answers every request by making a <em>second, separate</em> HTTP request of its own.
+  One proxied page load involves two TCP connections: browser&nbsp;→&nbsp;proxy (the front door),
+  and proxy&nbsp;→&nbsp;<a href="../reference/glossary.html#upstream">upstream</a> (a branch on an
+  internal port). The proxy copies the request across, relays the response back, and the browser
+  is none the wiser — its connection began and ended at <code>localhost:3000</code>.
+  <span class="sidenote">"Reverse" distinguishes it from a <em>forward</em> proxy, which sits in
+  front of <em>clients</em> (like a corporate web filter). A reverse proxy sits in front of
+  <em>servers</em>. Same copying trick, opposite side of the conversation.</span></p>
+
+  <p>The copy is not byte-identical: the proxy annotates it. Caddy's
+  <a href="https://caddyserver.com/docs/caddyfile/directives/reverse_proxy">reverse_proxy</a>
+  passes the original <code>Host</code> header through and adds <code>X-Forwarded-For</code>
+  (the real client address) and <code>X-Forwarded-Proto</code> (the original scheme), so the
+  branch can still know who really called. You'll see these headers with your own eyes in the
+  lab — the upstream servers below echo every header they receive.</p>
+
+  <h2>One trap before you start: automatic HTTPS</h2>
+
+  <p>Caddy's signature feature is
+  <a href="https://caddyserver.com/docs/automatic-https">automatic HTTPS</a>: give it a site
+  address with a recognizable hostname — even <code>localhost:3000</code> — and it will serve
+  <strong>https</strong> with a locally-generated certificate. Normally delightful. For us,
+  fatal: you learned in lesson 1 that the scheme is part of the exact-match string, and
+  <code>https://localhost:3000/callback</code> ≠ <code>http://localhost:3000/callback</code>.
+  The fix is to state the scheme explicitly in the site address: <code>http://localhost:3000</code>.
+  Mechanics, not incantation — you now know exactly why that prefix must be there.</p>
+
+  <h2>Lab: build the doorman</h2>
+
+  <div class="try-it">
+    <h3>Step 0 — Install Caddy (once)</h3>
+    <pre><code>brew install caddy
+caddy version</code></pre>
+    <p><strong>Checkpoint:</strong> a version string like <code>v2.x.x</code>.</p>
+  </div>
+
+  <div class="try-it">
+    <h3>Step 1 — Two fake branches</h3>
+    <p>Terminal 1 — "stable", on internal port 3101:</p>
+    <pre><code>node -e "const h=require('http');h.createServer((q,s)=>{s.end('STABLE BRANCH (3101)\n\n'+JSON.stringify(q.headers,null,2)+'\n')}).listen(3101,()=>console.log('stable up on 3101'))"</code></pre>
+    <p>Terminal 2 — "feature", on internal port 3102:</p>
+    <pre><code>node -e "const h=require('http');h.createServer((q,s)=>{s.end('FEATURE BRANCH (3102)\n\n'+JSON.stringify(q.headers,null,2)+'\n')}).listen(3102,()=>console.log('feature up on 3102'))"</code></pre>
+    <p><strong>Checkpoint:</strong> <code>curl -s localhost:3101</code> says STABLE,
+    <code>curl -s localhost:3102</code> says FEATURE. Two branches, alive at once — legal because
+    they're on <em>different</em> (address, port) pairs.</p>
+  </div>
+
+  <div class="try-it">
+    <h3>Step 2 — The doorman takes the front door</h3>
+    <p>Terminal 3:</p>
+    <pre><code>mkdir -p ~/src/workspace/labs/doorman
+cd ~/src/workspace/labs/doorman
+printf 'http://localhost:3000\n\nreverse_proxy :3101\n' > Caddyfile
+caddy run --config Caddyfile</code></pre>
+    <p><strong>Checkpoint:</strong> in a fourth terminal,
+    <code>curl -s localhost:3000</code> prints <em>STABLE BRANCH (3101)</em> — served from port
+    3000. Look at the echoed headers: <code>X-Forwarded-For: 127.0.0.1</code> and
+    <code>X-Forwarded-Proto: http</code> are the proxy's annotations; <code>Host</code> is still
+    <code>localhost:3000</code>. The upstream knows it's behind a doorman; the browser doesn't.</p>
+  </div>
+
+  <div class="try-it">
+    <h3>Step 3 — Swap branches without touching the origin</h3>
+    <p>Edit the Caddyfile so the upstream is <code>:3102</code>, then hot-reload:</p>
+    <pre><code>printf 'http://localhost:3000\n\nreverse_proxy :3102\n' > Caddyfile
+caddy reload --config Caddyfile</code></pre>
+    <p><strong>Checkpoint:</strong> <code>curl -s localhost:3000</code> now prints
+    <em>FEATURE BRANCH (3102)</em>. Same port, same scheme, same host — an OAuth provider
+    watching this flow could not tell anything changed. You just swapped the entire application
+    behind a login-safe origin, with zero downtime.</p>
+    <p>Open <code>http://localhost:3000</code> in your browser too — worth seeing outside curl.</p>
+  </div>
+
+  <div class="try-it">
+    <h3>Docker variant — the whole lab, no brew</h3>
+    <p>Prefer containers? The lab lives pre-built in <code>labs/doorman-docker/</code>
+    (a compose file, the Caddyfile, and one shared branch server script). The full command
+    sequence is also in that folder's <code>README.md</code> for terminal-side copying:</p>
+    <pre><code>cd ~/src/workspace/labs/doorman-docker
+docker compose up</code></pre>
+    <p><strong>Checkpoints:</strong> <code>curl -s localhost:3000</code> says STABLE — but
+    <code>curl -s localhost:3101</code> now <em>fails</em>: the branches publish no ports, so they
+    are reachable only through the doorman. To swap branches, edit the Caddyfile's upstream to
+    <code>feature:3102</code> and hot-reload the running container:</p>
+    <pre><code>docker compose exec doorman caddy reload --config /etc/caddy/Caddyfile</code></pre>
+    <p>(<code>caddy reload</code> must run <em>inside</em> the doorman container — that's where
+    the admin endpoint lives — hence <code>docker compose exec</code>.)</p>
+    <p>Two mechanics to notice. First, the Caddyfile says <code>stable:3101</code>, not
+    <code>localhost:3101</code> — inside the container, <code>localhost</code> means <em>the
+    container itself</em>; loopback is per network namespace, and compose gives services DNS names
+    instead. Second, <code>ports: "127.0.0.1:3000:3000"</code> is Docker's own little doorman: a
+    forwarder from the host's <code>(127.0.0.1, 3000)</code> into the container. Your browser
+    still sees exactly <code>http://localhost:3000</code>, so both laws hold.
+    <span class="sidenote">Later, when the upstreams are real <code>npm run dev</code> processes
+    on your Mac rather than containers, a dockerized doorman reaches them as
+    <code>host.docker.internal:3101</code> — Docker Desktop's name for "the machine hosting
+    me".</span></p>
+  </div>
+
+  <p class="key-idea">The origin is a contract with the browser and the IdP.
+  The upstream is an implementation detail. Caddy lets you re-decide the
+  implementation detail at any moment, without renegotiating the contract.</p>
+
+  <p>Notice what you already have: keep stable on 3101 and any feature branch on 3102, and
+  <code>caddy reload</code> is a one-line "which branch is live?" switch — OAuth intact. What you
+  <em>don't</em> have yet is both at once in two browser windows. That needs the doorman to route
+  <em>per session</em> rather than for everyone — and cookies make that subtle. That's lesson
+  0003.</p>
+
+  <h2>Check yourself</h2>
+  <div class="quiz" id="quiz"></div>
+
+  <h2>Primary source</h2>
+  <p>Read the official
+  <a href="https://caddyserver.com/docs/quick-starts/reverse-proxy">Caddy reverse proxy
+  quick-start</a> — five minutes, and it covers the exact one-liner ↔ Caddyfile correspondence
+  you just used, including when automatic HTTPS does and doesn't activate. Keep the
+  <a href="../reference/caddyfile-cheatsheet.html">course Caddyfile cheat-sheet</a> beside you
+  from here on.</p>
+
+  <footer>
+    <p><strong>Next:</strong> Lesson 0003 — <em>Routing the callback</em>: cookie-chosen
+    upstreams, why side-by-side needs two browser profiles, and where the OAuth callback lands.</p>
+    <p>Reference: <a href="../reference/glossary.html">Glossary</a> ·
+    <a href="../reference/caddyfile-cheatsheet.html">Caddyfile cheat-sheet</a> ·
+    Previous: <a href="0001-one-port-one-listener.html">0001 — One port, one listener</a></p>
+    <p>Stuck at a checkpoint, or curious why <code>Host</code> passes through unchanged? Ask your
+    teacher (the agent) — bring the exact output you saw.</p>
+  </footer>
+</article>
+
+<script src="../assets/copy.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+renderQuiz(document.getElementById('warmup'), [
+  {
+    stem: "Which pair must be unique per listening socket?",
+    options: ["Address and port", "Process and thread", "Branch and commit", "Scheme and host"],
+    answer: 0,
+    explain: "Ownership is claimed at bind time over an (address, port) pair — that's why 3101 and 3102 can coexist but two servers on 3000 cannot."
+  },
+  {
+    stem: "Under RFC 9700, providers compare redirect URIs using what?",
+    options: ["Simple string comparison", "Prefix pattern comparison", "Wildcard pattern comparison", "Fuzzy string comparison"],
+    answer: 0,
+    explain: "Character-for-character equality (RFC 3986 §6.2.1). Scheme, host, port, and path must all match — which is why the doorman must preserve all four."
+  }
+]);
+
+renderQuiz(document.getElementById('quiz'), [
+  {
+    stem: "One page load through the doorman involves how many TCP connections?",
+    options: ["Exactly two", "Exactly one", "Exactly three", "Exactly four"],
+    answer: 0,
+    explain: "Browser→proxy and proxy→upstream are separate connections. That separation is the whole trick: each side only knows its own half."
+  },
+  {
+    stem: "Why must the site address say http://localhost:3000 rather than localhost:3000?",
+    options: [
+      "A bare hostname triggers automatic HTTPS",
+      "A bare hostname disables the proxy",
+      "A bare hostname changes the port",
+      "A bare hostname blocks browser cookies"
+    ],
+    answer: 0,
+    explain: "Caddy auto-serves HTTPS for recognizable hostnames — and https ≠ http under exact string matching, so the login flow would break."
+  },
+  {
+    stem: "How does the upstream branch learn the real client details?",
+    options: [
+      "Through added X-Forwarded headers",
+      "Through the original socket",
+      "Through the TLS handshake",
+      "Through the request body"
+    ],
+    answer: 0,
+    explain: "The upstream's TCP peer is the proxy, not the browser — so Caddy annotates the copied request with X-Forwarded-For and X-Forwarded-Proto."
+  },
+  {
+    stem: "What happens to the browser-visible origin when you swap upstreams?",
+    options: ["It never changes", "It switches ports", "It switches schemes", "It switches hosts"],
+    answer: 0,
+    explain: "The swap is entirely behind the front door. Origin — scheme + host + port — stays http://localhost:3000, which is why OAuth and cookies survive the switch."
+  }
+]);
+</script>
+</body>
+</html>

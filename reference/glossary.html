@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary — Many Branches, One Port</title>
+<link rel="stylesheet" href="../assets/course.css">
+<style>
+  dt { font-weight: 600; margin-top: 1.1rem; }
+  dd { margin-left: 0; color: #333; }
+</style>
+</head>
+<body>
+<article>
+  <h1>Glossary</h1>
+  <p class="subtitle">Shared vocabulary for the course. Every lesson uses these terms in exactly these senses.</p>
+
+  <dl>
+    <dt id="port">Port</dt>
+    <dd>A 16-bit number (0–65535) that lets one machine host many network conversations at once. "Port 3000" means nothing by itself — it's always half of an <em>(address, port)</em> pair.</dd>
+
+    <dt id="socket">Socket</dt>
+    <dd>The OS object a program uses to send and receive network traffic. A <em>listening</em> socket is one that has claimed an (address, port) pair and waits for incoming connections.</dd>
+
+    <dt id="bind">Bind</dt>
+    <dd>The system call that claims an (address, port) pair for a socket. This is the moment ownership is decided — before any traffic flows. See <a href="https://beej.us/guide/bgnet/">Beej's Guide</a>.</dd>
+
+    <dt id="eaddrinuse">EADDRINUSE</dt>
+    <dd>The error the OS returns when a program tries to bind an (address, port) pair that another listening socket already owns. This is what a second <code>npm run dev</code> on port 3000 dies with.</dd>
+
+    <dt id="loopback">Loopback</dt>
+    <dd>The virtual network interface (<code>127.0.0.1</code>, and the whole <code>127.0.0.0/8</code> range) that never leaves your machine. <code>localhost</code> is a hostname that resolves to it.</dd>
+
+    <dt id="origin">Origin</dt>
+    <dd>A browser-security triple: <em>scheme + host + port</em>. <code>http://localhost:3000</code> and <code>http://localhost:3001</code> are different origins — cookies and storage are not shared between them.</dd>
+
+    <dt id="client">Client (OAuth)</dt>
+    <dd>Your application, as registered with the authorization server. Defined in <a href="https://www.rfc-editor.org/rfc/rfc6749">RFC 6749</a>.</dd>
+
+    <dt id="authorization-server">Authorization server / IdP</dt>
+    <dd>The service that authenticates the user and issues authorization codes/tokens (Auth0, Google, Okta, an internal identity provider…). It is the party enforcing your redirect_uri rule.</dd>
+
+    <dt id="redirect-uri">redirect_uri (redirection endpoint)</dt>
+    <dd>The URL the authorization server sends the user's browser back to after login, carrying the authorization code. Registered ahead of time; validated on every request. <a href="https://www.rfc-editor.org/rfc/rfc6749#section-3.1.2">RFC 6749 §3.1.2</a>.</dd>
+
+    <dt id="exact-matching">Exact string matching</dt>
+    <dd>The validation rule from <a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700</a> §2.1: the presented redirect_uri MUST equal a registered one character-for-character (RFC 3986 §6.2.1 simple string comparison). No wildcards, no "close enough", no dev-mode leniency.</dd>
+
+    <dt id="loopback-exception">Loopback port exception</dt>
+    <dd>The single carve-out to exact matching: <em>native apps</em> (desktop/mobile binaries) may vary the port on loopback redirect URIs. <a href="https://www.rfc-editor.org/rfc/rfc8252#section-7.3">RFC 8252 §7.3</a>. Web apps do not qualify.</dd>
+
+    <dt id="reverse-proxy">Reverse proxy</dt>
+    <dd>A server that owns a front-door (address, port) and forwards each incoming request to one of several backend servers, relaying the response. The browser only ever sees the front door.</dd>
+
+    <dt id="upstream">Upstream</dt>
+    <dd>One of the backend servers a reverse proxy forwards to. In this course: one running branch = one upstream on its own internal port.</dd>
+
+    <dt id="x-forwarded">X-Forwarded-* headers</dt>
+    <dd>Headers a proxy adds to the copied request so the upstream can see past it: <code>X-Forwarded-For</code> (real client address) and <code>X-Forwarded-Proto</code> (original scheme). Added by <a href="https://caddyserver.com/docs/caddyfile/directives/reverse_proxy">Caddy's reverse_proxy</a> by default.</dd>
+
+    <dt id="automatic-https">Automatic HTTPS (Caddy)</dt>
+    <dd>Caddy serves TLS for any site address with a recognizable hostname — including <code>localhost</code> — unless the address carries an explicit <code>http://</code> prefix. Relevant here because the scheme is part of <a href="#exact-matching">exact matching</a>. <a href="https://caddyserver.com/docs/automatic-https">Docs</a>.</dd>
+  </dl>
+
+  <footer>
+    <p>Part of the <em>Many Branches, One Port</em> course. Lessons:
+    <a href="../lessons/0001-one-port-one-listener.html">0001 — One port, one listener</a> ·
+    <a href="../lessons/0002-the-doorman.html">0002 — The doorman</a>.
+    Reference: <a href="caddyfile-cheatsheet.html">Caddyfile cheat-sheet</a>.</p>
+  </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 — One Port, One Listener</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<article>
+  <h1>One port, one listener</h1>
+  <p class="subtitle">Lesson 0001 · Many Branches, One Port · ~10 minutes</p>
+
+  <p class="mission-tie">Mission check: you want a stable branch <em>and</em> feature branches
+  running at once, but OAuth login only works at exactly <code>http://localhost:3000/…</code>.
+  This lesson explains the two mechanical laws that create that trap — so the fix, when it
+  comes, is obvious rather than magic.</p>
+
+  <h2>Law 1: an (address, port) pair has exactly one owner</h2>
+
+  <p>"Port 3000" is not a thing a program owns. What a program owns is a
+  <a href="../reference/glossary.html#socket">listening socket</a> bound to an
+  <em>(address,&nbsp;port)</em> pair — here, <code>(127.0.0.1, 3000)</code>. The claim happens at
+  the <a href="../reference/glossary.html#bind">bind</a> call, before any traffic flows, and the
+  operating system enforces uniqueness: the second process to try gets
+  <a href="../reference/glossary.html#eaddrinuse"><code>EADDRINUSE</code></a> and dies.
+  <span class="sidenote">There is a kernel escape hatch called <code>SO_REUSEPORT</code> that lets
+  several processes share a port — but the kernel then <em>load-balances</em> connections across
+  them arbitrarily. You'd get branch A or branch B at random on each request. Precisely useless
+  for our mission.</span></p>
+
+  <p>This is why the constraint is real and not just a framework quirk: no amount of Next.js or
+  Vite configuration lets two dev servers both be <code>localhost:3000</code>.</p>
+
+  <div class="try-it">
+    <h3>Try it — 60 seconds</h3>
+    <p>Watch the OS enforce Law 1. In one terminal:</p>
+    <pre><code>node -e "require('http').createServer((q,s)=>s.end('branch A\n')).listen(3000,()=>console.log('A owns (127.0.0.1, 3000)'))"</code></pre>
+    <p>In a second terminal, try to start "branch B" the same way:</p>
+    <pre><code>node -e "require('http').createServer((q,s)=>s.end('branch B\n')).listen(3000)"
+# → Error: listen EADDRINUSE: address already in use :::3000</code></pre>
+    <p>See who the owner is (this command is worth memorizing):</p>
+    <pre><code>lsof -nP -iTCP:3000 -sTCP:LISTEN</code></pre>
+  </div>
+
+  <h2>Law 2: redirect_uri matching is exact — by design, everywhere</h2>
+
+  <p>When your app sends the browser to the identity provider, it includes a
+  <a href="../reference/glossary.html#redirect-uri"><code>redirect_uri</code></a> — where the
+  browser should be sent back with the authorization code. The provider compares it against the
+  registered value using <strong>simple string comparison</strong>: character-for-character
+  equality. This isn't your provider being fussy in dev mode; it's
+  <a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700</a> §2.1, the OAuth security
+  Best Current Practice: servers <em>MUST</em> use exact matching, because every pattern-matching
+  scheme ever deployed has been exploited to steal authorization codes (§4.1).
+  <span class="sidenote">The one exception: <em>native apps</em> may vary the port on loopback
+  URIs (<a href="https://www.rfc-editor.org/rfc/rfc8252#section-7.3">RFC 8252 §7.3</a>), because
+  a desktop binary can't guarantee any port is free. Browser apps don't qualify — which is exactly
+  the wall you hit.</span></p>
+
+  <p>Run the registered value <code>http://localhost:3000/callback</code> against the obvious
+  workarounds and each fails on a different character:</p>
+
+  <pre><code>http://localhost:3000/callback   registered ✓
+http://localhost:3001/callback   port differs        ✗
+http://127.0.0.1:3000/callback   host differs        ✗
+http://feat.localhost:3000/...   host differs        ✗
+https://localhost:3000/callback  scheme differs      ✗</code></pre>
+
+  <p>So: Law 1 says only one process can answer at <code>localhost:3000</code>. Law 2 says the
+  login flow must pass through <code>localhost:3000</code>. Trap closed — apparently.</p>
+
+  <h2>The reframe that opens the trap</h2>
+
+  <p>Read Law 2 again, precisely. It constrains what the <em>browser and the identity provider</em>
+  see: one exact URL. It says nothing about what happens <em>behind</em> that URL. And Law 1 says
+  one <em>listener</em> — it never says the listener must be your app.</p>
+
+  <p class="key-idea">Nothing requires the process at <code>localhost:3000</code> to be a branch.
+  It can be a doorman — a <a href="../reference/glossary.html#reverse-proxy">reverse proxy</a> —
+  that forwards each request to any of N branches running on internal ports the browser never
+  sees.</p>
+
+  <p>Branch A runs on 3101, branch B on 3102, the proxy owns 3000. Every URL in the OAuth dance —
+  including the callback — is <code>localhost:3000</code>, so both laws are satisfied, yet N
+  branches are alive at once. The remaining puzzle (next lesson) is how the doorman decides
+  <em>which</em> branch gets a given request — that's where routing, cookies, and browser
+  profiles come in.</p>
+
+  <h2>Check yourself</h2>
+  <p>From memory — don't scroll up. Options are shuffled each reload, so retake it in a few days.</p>
+
+  <div class="quiz" id="quiz"></div>
+
+  <h2>Primary source</h2>
+  <p>Read the short redirect-URI passages of
+  <a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700 — Best Current Practice for OAuth 2.0
+  Security</a>: §2.1 (the exact-matching MUST) and §4.1 (the code-theft attacks that justify it).
+  Ten minutes, and you'll never again wonder if there's a dev-mode toggle you're missing — there
+  isn't, on purpose.</p>
+
+  <footer>
+    <p><strong>Next:</strong> Lesson 0002 — <em>The doorman: your first reverse proxy</em>
+    (hands-on with <a href="https://caddyserver.com/docs/quick-starts/reverse-proxy">Caddy</a>,
+    two fake branches, one front door).</p>
+    <p>Reference: <a href="../reference/glossary.html">Glossary</a> ·
+    Course plan: <a href="../MISSION.md">MISSION.md</a></p>
+    <p>Anything unclear — the sidenotes, the RFC language, why <code>SO_REUSEPORT</code> won't
+    work — ask your teacher (the agent) as a follow-up. That's what it's for.</p>
+  </footer>
+</article>
+
+<script src="../assets/copy.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+renderQuiz(document.getElementById('quiz'), [
+  {
+    stem: "Starting a second branch on port 3000 fails immediately. Why?",
+    options: [
+      "The OS allows one listener per address-port",
+      "Node caps each machine at one server",
+      "The browser blocks two tabs per port",
+      "Git locks the port for each branch"
+    ],
+    answer: 0,
+    explain: "Ownership is decided at bind time: one listening socket per (address, port) pair. The second bind gets EADDRINUSE from the kernel — no framework is involved."
+  },
+  {
+    stem: "The provider registered http://localhost:3000/callback. Which redirect_uri passes validation?",
+    options: [
+      "http://localhost:3000/callback",
+      "http://localhost:3001/callback",
+      "https://localhost:3000/callback",
+      "http://app.localhost:3000/callback"
+    ],
+    answer: 0,
+    explain: "RFC 9700 §2.1 requires simple string comparison — character-for-character. A different port, scheme, or host each breaks equality."
+  },
+  {
+    stem: "The loopback variable-port exception (RFC 8252 §7.3) applies to which apps?",
+    options: [
+      "Native apps only",
+      "Web apps only",
+      "QA builds only",
+      "All local apps"
+    ],
+    answer: 0,
+    explain: "Desktop/mobile binaries can't guarantee a fixed free port, so they alone may vary the loopback port. Browser-based apps get no exception — that's the wall you hit."
+  },
+  {
+    stem: "Which fact makes the reverse-proxy plan legal under exact matching?",
+    options: [
+      "The IdP never sees the internal ports",
+      "The IdP whitelists every port during development",
+      "The proxy rewrites the registered redirect URI",
+      "The browser ignores ports on loopback addresses"
+    ],
+    answer: 0,
+    explain: "Every URL in the OAuth flow stays exactly localhost:3000. The proxy-to-branch hop happens server-side on your machine, invisible to both the browser and the identity provider."
+  }
+]);
+</script>
+</body>
+</html>

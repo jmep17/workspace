@@ -1,0 +1,7 @@
+# Explicit http:// — a bare hostname would trigger automatic HTTPS,
+# and the scheme is part of exact-match redirect_uri validation (lesson 0001).
+http://localhost:3000
+
+# Inside the compose network, service names are DNS names.
+# Swap :3101 ↔ feature:3102, then hot-reload (see lab instructions).
+reverse_proxy stable:3101
