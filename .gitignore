@@ -4,6 +4,9 @@
 # fish universal variables — machine state written next to the config
 .config/fish/fish_variables
 
+# Claude Code worktree sandboxes live inside the repo but are separate checkouts
+.claude/worktrees/
+
 # The private "work" collection and its bridge links stay uncommitted
 /work/
 skills/work-*
