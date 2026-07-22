@@ -1,10 +1,11 @@
 """settings.json schema + editing, and lifecycle hooks (incl. test-fire)."""
 
+from pathlib import Path
 import json
 import re
 import subprocess
 
-from .core import MAPPINGS, REPO, config_dir, get_source, mapping_repo
+from .core import CONFIG_FILES, atomic_write, config_dir, tilde
 
 
 # User-scope settings.json keys, from https://code.claude.com/docs/en/settings
@@ -190,16 +191,8 @@ SETTINGS_SCHEMA = [s for s in SETTINGS_SCHEMA
 SETTINGS_KEY_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$-]*$")
 
 def settings_state():
-    path = mapping_repo("settings.json")
-    target = config_dir() / "settings.json"
-    linked = False
-    if target.is_symlink():
-        try:
-            linked = target.resolve() == path.resolve()
-        except OSError:
-            pass
-    st = {"path": str(path.relative_to(REPO)), "source": get_source("settings.json"),
-          "exists": path.is_file(), "linked": linked, "data": {}, "error": None}
+    path = config_dir() / "settings.json"
+    st = {"path": tilde(path), "exists": path.is_file(), "data": {}, "error": None}
     if path.is_file():
         try:
             data = json.loads(path.read_text())
@@ -212,15 +205,14 @@ def settings_state():
     return st
 
 def file_read(mid):
-    if MAPPINGS.get(mid, {}).get("kind") != "file":
+    if mid not in CONFIG_FILES:
         raise ValueError("not an editable config file")
-    path = mapping_repo(mid)
-    return {"id": mid, "path": str(path.relative_to(REPO)),
-            "exists": path.is_file(), "source": get_source(mid),
+    path = config_dir() / mid
+    return {"id": mid, "path": tilde(path), "exists": path.is_file(),
             "content": path.read_text(errors="replace") if path.is_file() else ""}
 
 def file_save(mid, content):
-    if MAPPINGS.get(mid, {}).get("kind") != "file":
+    if mid not in CONFIG_FILES:
         raise ValueError("not an editable config file")
     if not isinstance(content, str) or len(content) > 2 * 1024 * 1024:
         raise ValueError("bad content")
@@ -229,14 +221,12 @@ def file_save(mid, content):
             json.loads(content)
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON: {e}") from None
-    path = mapping_repo(mid)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    atomic_write(config_dir() / mid, content)
 
 def settings_set(key, value):
     if not SETTINGS_KEY_RE.match(key or ""):
         raise ValueError("bad settings key")
-    path = mapping_repo("settings.json")
+    path = config_dir() / "settings.json"
     data = {}
     if path.is_file():
         try:
@@ -267,8 +257,7 @@ def settings_set(key, value):
         prune(data)
     else:
         node[parts[-1]] = value
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    atomic_write(path, json.dumps(data, indent=2) + "\n")
 
 HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
                "Notification", "Stop", "SubagentStop", "PreCompact", "SessionEnd"]
@@ -276,7 +265,7 @@ HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
 def hook_sample(event):
     """Representative stdin payload for test-firing a hook command."""
     base = {"session_id": "claude-ui-test", "transcript_path": "/tmp/transcript.jsonl",
-            "cwd": str(REPO), "hook_event_name": event}
+            "cwd": str(Path.home()), "hook_event_name": event}
     if event in ("PreToolUse", "PostToolUse"):
         base.update(tool_name="Bash", tool_input={"command": "echo hello"})
         if event == "PostToolUse":
@@ -295,7 +284,7 @@ def hook_test(command, event):
     if event not in HOOK_EVENTS:
         event = "PreToolUse"
     try:
-        r = subprocess.run(command, shell=True, cwd=str(REPO),
+        r = subprocess.run(command, shell=True, cwd=str(Path.home()),
                            input=json.dumps(hook_sample(event)),
                            capture_output=True, text=True, timeout=10)
     except subprocess.TimeoutExpired:

@@ -3,7 +3,7 @@
 import json
 import re
 
-from .core import REPO, _read_json_object, get_source
+from .core import _read_json_object, atomic_write, config_dir, tilde
 from .settings import settings_set, settings_state
 
 
@@ -517,20 +517,20 @@ print("\\n".join(sep.join(l) for l in lines if l))
 '''
 
 def statusline_paths():
-    src = get_source("statusline.sh")
-    base = REPO / "claude" if src == "claude" else REPO / src
-    return src, base / "statusline.json", base / "statusline.sh"
+    """(config json, script) — both live directly in the Claude config dir."""
+    cfg = config_dir()
+    return cfg / "statusline.json", cfg / "statusline.sh"
 
 def statusline_state():
-    src, cfgp, scriptp = statusline_paths()
+    cfgp, scriptp = statusline_paths()
     cfg, err = _read_json_object(cfgp)
     sdata = settings_state()["data"]
     sl = sdata.get("statusLine") if isinstance(sdata, dict) else None
     applied = (isinstance(sl, dict)
-               and sl.get("command") == "~/.claude/statusline.sh")
-    return {"source": src, "config": cfg if cfg else None, "error": err,
+               and sl.get("command") in (tilde(scriptp), str(scriptp)))
+    return {"config": cfg if cfg else None, "error": err,
             "script_exists": scriptp.is_file(),
-            "script_path": str(scriptp.relative_to(REPO)),
+            "script_path": tilde(scriptp),
             "available": STATUSLINE_FIELDS,
             "default": STATUSLINE_DEFAULT,
             "applied": applied,
@@ -565,13 +565,13 @@ def statusline_save(config, apply):
     if not isinstance(refresh, int) or not 0 <= refresh <= 3600:
         raise ValueError("bad refresh interval")
     clean = {"separator": sep, "refresh": refresh, "fields": fields}
-    _, cfgp, scriptp = statusline_paths()
-    cfgp.parent.mkdir(parents=True, exist_ok=True)
-    cfgp.write_text(json.dumps(clean, indent=2) + "\n")
-    scriptp.write_text(STATUSLINE_SCRIPT.replace("__CONFIG__", json.dumps(json.dumps(clean))))
-    scriptp.chmod(0o755)
+    cfgp, scriptp = statusline_paths()
+    atomic_write(cfgp, json.dumps(clean, indent=2) + "\n")
+    atomic_write(scriptp,
+                 STATUSLINE_SCRIPT.replace("__CONFIG__", json.dumps(json.dumps(clean))),
+                 mode=0o755)
     if apply:
-        sl = {"type": "command", "command": "~/.claude/statusline.sh"}
+        sl = {"type": "command", "command": tilde(scriptp)}
         if refresh:
             sl["refreshInterval"] = refresh
         settings_set("statusLine", sl)

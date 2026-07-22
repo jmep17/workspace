@@ -1,4 +1,4 @@
-"""Health checks over the whole config surface, with safe fix actions."""
+"""Report-only health checks over the live machine config."""
 
 from pathlib import Path
 import json
@@ -6,9 +6,8 @@ import os
 import shutil
 import time
 
-from .core import REPO, SKILLS, TYPES, _read_json_object, config_dir
-from .items import SK_ARCHIVE, TRASH, scan_md, scan_skills, skill_groups_map, trash_entries
-from .links import link_state
+from .core import ITEM_TYPES, _read_json_object, config_dir, tilde
+from .items import scan_items
 from .mcp import mcp_state
 from .settings import SETTINGS_SCHEMA, settings_state
 from .statusline import STATUSLINE_SCRIPT, statusline_paths
@@ -29,53 +28,30 @@ def _cmd_missing(cmd):
 def doctor():
     finds = []
 
-    def add(level, area, msg, fix=None):
-        finds.append({"level": level, "area": area, "msg": msg, "fix": fix})
+    def add(level, area, msg):
+        finds.append({"level": level, "area": area, "msg": msg})
 
     cfg = config_dir()
-    home = str(Path.home())
 
-    # leftover *.bak from linking
     if cfg.is_dir():
         for p in sorted(cfg.glob("*.bak*")):
-            add("warn", "links",
-                f"{str(p).replace(home, '~', 1)} — backup left behind by a "
-                "link operation; delete once you're sure",
-                {"action": "delete-bak", "path": str(p)})
-        # broken symlinks in the config dir itself
+            add("info", "config", f"{tilde(p)} — leftover backup; delete once "
+                                  "you're sure")
         for p in sorted(cfg.iterdir()):
             if p.is_symlink() and not p.exists():
-                add("warn", "links",
-                    f"{str(p).replace(home, '~', 1)} — broken symlink "
-                    f"(points at {p.readlink()})",
-                    {"action": "rm-broken-link", "path": str(p)})
+                add("warn", "config", f"{tilde(p)} — broken symlink "
+                                      f"(points at {p.readlink()})")
 
-    tr = trash_entries()
-    if tr:
-        add("info", "trash",
-            f"{len(tr)} deleted item(s) in archive/trash — restorable until purged",
-            {"action": "purge-trash", "path": ""})
-
-    # link rows needing attention
-    for row in link_state():
-        if row["status"] in ("elsewhere", "missing", "real", "adopt"):
-            add("info", "links",
-                f"{row['target']}: {row['status']} — see the links panel")
-
-    # group bridge collisions: a real dir shadowing a would-be managed link
-    for g, d in skill_groups_map().items():
-        if not d.is_dir():
-            continue
-        for x in d.iterdir():
-            if x.is_dir() and not x.name.startswith("."):
-                link = SKILLS / f"{g}-{x.name}"
-                if link.exists() and not link.is_symlink():
-                    add("warn", "skills",
-                        f"skills/{g}-{x.name} exists as a real dir and shadows "
-                        f"the {g}/{x.name} bridge link")
+    # ~/.claude.json / settings.json that don't parse
+    st = mcp_state()
+    if st["machine_error"]:
+        add("warn", "mcp", f"{st['machine_path']}: {st['machine_error']}")
+    sstate = settings_state()
+    if sstate["error"]:
+        add("warn", "settings", f"{sstate['path']}: {sstate['error']}")
 
     # settings.json: hooks / statusLine pointing at missing executables
-    sdata = settings_state()["data"]
+    sdata = sstate["data"]
     hooks = sdata.get("hooks")
     if isinstance(hooks, dict):
         for event, matchers in hooks.items():
@@ -98,14 +74,14 @@ def doctor():
                                     f"schema: {k}")
 
     # MCP: stdio commands that don't resolve on this machine
-    for s in mcp_state()["servers"]:
+    for s in st["servers"]:
         cmd = (s["config"] or {}).get("command")
         if cmd and _cmd_missing(cmd):
             add("warn", "mcp", f"{s['name']}: command not found: {cmd}")
 
     # statusline drift: script on disk differs from what the saved config
     # would generate (hand edits get overwritten on the next UI save)
-    _, cfgp, scriptp = statusline_paths()
+    cfgp, scriptp = statusline_paths()
     if cfgp.is_file() and scriptp.is_file():
         saved, err = _read_json_object(cfgp)
         if not err and saved:
@@ -113,35 +89,34 @@ def doctor():
                 "__CONFIG__", json.dumps(json.dumps(saved)))
             if scriptp.read_text(errors="replace") != expected:
                 add("warn", "statusline",
-                    f"{scriptp.relative_to(REPO)} differs from the saved "
-                    "statusline config — hand edits are lost on the next UI save")
+                    f"{tilde(scriptp)} differs from the saved statusline "
+                    "config — hand edits are lost on the next UI save")
 
     # item quality
-    for t, spec in TYPES.items():
-        items = (scan_skills(SKILLS, "active") if spec["kind"] == "dir"
-                 else scan_md(t, "active"))
-        for it in items:
+    for t in ITEM_TYPES:
+        for it in scan_items(t):
+            where = "" if it["enabled"] else " (disabled)"
             if it.get("broken"):
-                add("warn", t, f"{it['name']}: broken symlink")
+                add("warn", t, f"{it['name']}{where}: broken symlink")
             if it.get("incomplete"):
-                add("warn", t, f"{it['name']}: missing SKILL.md")
+                add("warn", t, f"{it['name']}{where}: missing SKILL.md")
             if it.get("todo"):
-                add("info", t, f"{it['name']}: leftover TODO placeholder")
+                add("info", t, f"{it['name']}{where}: leftover TODO placeholder")
             if it.get("name_mismatch"):
-                add("info", t, f"{it['name']}: frontmatter name doesn't match "
-                               "the folder name")
+                add("info", t, f"{it['name']}{where}: frontmatter name doesn't "
+                               "match the folder name")
             if it.get("long_desc"):
-                add("info", t, f"{it['name']}: description over 1024 chars")
-            if (t == "skills" and it.get("description")
+                add("info", t, f"{it['name']}{where}: description over 1024 chars")
+            if (t == "skills" and it["enabled"] and it.get("description")
                     and "use when" not in it["description"].lower()
-                    and not it.get("todo")):
+                    and not it.get("todo") and not it.get("broken")):
                 add("info", t, f"{it['name']}: description has no \"Use when …\" "
                                "trigger — Claude may not know when to load it")
 
-    # plugin skills sharing a name with repo skills (one shadows the other)
+    # plugin skills sharing a name with config skills (one shadows the other)
     plugins_dir = Path.home() / ".claude" / "plugins"
     if plugins_dir.is_dir():
-        ours = {i["name"] for i in scan_skills(SKILLS, "active")}
+        ours = {i["name"] for i in scan_items("skills") if i["enabled"]}
         try:
             for smd in list(plugins_dir.glob("*/*/skills/*/SKILL.md"))[:500] + \
                        list(plugins_dir.glob("*/*/*/skills/*/SKILL.md"))[:500]:
@@ -153,49 +128,8 @@ def doctor():
         except OSError:
             pass
 
-    # archive entries that collide with active names (restore would fail)
-    for t, spec in TYPES.items():
-        archived = (scan_skills(SK_ARCHIVE, "archived") if spec["kind"] == "dir"
-                    else scan_md(t, "archived"))
-        active = {i["name"] for i in
-                  (scan_skills(SKILLS, "active") if spec["kind"] == "dir"
-                   else scan_md(t, "active"))}
-        for it in archived:
-            if it["name"] in active:
-                add("info", t, f"{it['name']}: exists in both active and "
-                               "archive — restore would fail")
-
     order = {"warn": 0, "info": 1}
     finds.sort(key=lambda f: (order[f["level"]], f["area"]))
     return {"findings": finds,
             "warns": sum(1 for f in finds if f["level"] == "warn"),
             "ts": time.strftime("%H:%M:%S")}
-
-def doctor_fix(action, path):
-    if action == "purge-trash":
-        shutil.rmtree(TRASH, ignore_errors=True)
-        return
-    p = Path(path)
-    cfg = config_dir().resolve()
-    try:
-        inside = p.resolve(strict=False).is_relative_to(cfg)
-    except OSError:
-        inside = False
-    parent_ok = p.parent.resolve() == cfg if p.parent.exists() else False
-    if not (inside or parent_ok):
-        raise ValueError("path is outside the config dir")
-    if action == "delete-bak":
-        if ".bak" not in p.name:
-            raise ValueError("not a .bak path")
-        if p.is_symlink() or p.is_file():
-            p.unlink()
-        elif p.is_dir():
-            shutil.rmtree(p)
-        else:
-            raise ValueError(f"{p}: not found")
-    elif action == "rm-broken-link":
-        if not (p.is_symlink() and not p.exists()):
-            raise ValueError(f"{p}: not a broken symlink")
-        p.unlink()
-    else:
-        raise ValueError("unknown fix action")

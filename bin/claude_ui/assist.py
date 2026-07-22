@@ -1,10 +1,9 @@
 """Claude-assisted authoring via the local `claude -p` CLI."""
 
+from pathlib import Path
 import re
 import shutil
 import subprocess
-
-from .core import REPO
 
 
 ASSIST_PRESETS = {
@@ -40,7 +39,7 @@ def assist(mode, custom, content, path):
                    "No preamble, no explanation, no code fences.")
     try:
         r = subprocess.run([exe, "-p", prompt], capture_output=True, text=True,
-                           timeout=240, cwd=str(REPO))
+                           timeout=240, cwd=str(Path.home()))
     except subprocess.TimeoutExpired:
         raise ValueError("claude -p timed out after 240s") from None
     if r.returncode != 0:

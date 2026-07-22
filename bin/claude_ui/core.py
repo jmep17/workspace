@@ -11,37 +11,19 @@ import secrets
 # this file lives at <repo>/bin/claude_ui/core.py
 REPO = Path(__file__).resolve().parents[2]
 
-SKILLS = REPO / "skills"
-
-ARCHIVE = REPO / "archive"
-
 CONFIG_FILE = REPO / ".claude-ui.json"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-TYPES = {
-    "skills": {"kind": "dir", "root": SKILLS},
-    "commands": {"kind": "md", "root": REPO / "commands"},
-    "agents": {"kind": "md", "root": REPO / "agents"},
-    "output-styles": {"kind": "md", "root": REPO / "output-styles"},
+# the four item-type directories inside the Claude config dir
+ITEM_TYPES = {
+    "skills": {"kind": "dir"},
+    "commands": {"kind": "md"},
+    "agents": {"kind": "md"},
+    "output-styles": {"kind": "md"},
 }
 
-CONFIG_FILES = ("CLAUDE.md", "settings.json", "keybindings.json", "statusline.sh")
-
-MAPPINGS = {
-    "skills": {"cfg": "skills", "kind": "dir"},
-    "commands": {"cfg": "commands", "kind": "dir"},
-    "agents": {"cfg": "agents", "kind": "dir"},
-    "output-styles": {"cfg": "output-styles", "kind": "dir"},
-    **{f: {"cfg": f, "kind": "file"} for f in CONFIG_FILES},
-}
-
-# top-level dirs that are never collections
-NON_COLLECTIONS = {"bin", "docs", "archive", "claude", "skills", "commands",
-                   "agents", "output-styles", "nvim", "tmux", "ghostty", "prompts"}
-
-COLLECTION_MARKERS = ("skills", "commands", "agents", "output-styles",
-                      "mcp-servers.json") + CONFIG_FILES
+CONFIG_FILES = ("CLAUDE.md", "settings.json", "keybindings.json")
 
 MCP_FILE = "mcp-servers.json"
 
@@ -50,17 +32,6 @@ CLAUDE_JSON = Path.home() / ".claude.json"  # user-scope mcpServers live here
 # Per-run token: POSTs must echo it back, so a random webpage doing
 # cross-origin/DNS-rebinding requests against 127.0.0.1 can't mutate config.
 TOKEN = secrets.token_hex(16)
-
-def collections():
-    """Top-level dirs shaped like a Claude config (e.g. work/)."""
-    out = []
-    for e in sorted(REPO.iterdir()):
-        if (not e.is_dir() or e.is_symlink() or e.name.startswith(".")
-                or e.name in NON_COLLECTIONS):
-            continue
-        if any((e / m).exists() for m in COLLECTION_MARKERS):
-            out.append(e.name)
-    return out
 
 def read_cfg():
     if CONFIG_FILE.is_file():
@@ -94,34 +65,12 @@ def set_config_dir(path):
         cfg["config_dir"] = str(p)
     write_cfg(cfg)
 
-def get_source(fname):
-    """Which copy of a config file is linked: 'claude' (shared) or a collection."""
-    src = read_cfg().get("sources", {}).get(fname, "claude")
-    return src if src == "claude" or src in collections() else "claude"
+def disabled_dir():
+    """Parked home for disabled things — outside every dir Claude Code scans."""
+    return config_dir() / "disabled"
 
-def set_source(fname, source):
-    if fname not in CONFIG_FILES:
-        raise ValueError("unknown config file")
-    if source != "claude" and source not in collections():
-        raise ValueError(f"{source}: no such collection")
-    cfg = read_cfg()
-    sources = cfg.setdefault("sources", {})
-    if source == "claude":
-        sources.pop(fname, None)
-        if not sources:
-            cfg.pop("sources", None)
-    else:
-        sources[fname] = source
-    write_cfg(cfg)
-
-def mapping_repo(mid):
-    """Repo-side path for a mapping, honoring the selected file source."""
-    m = MAPPINGS[mid]
-    if m["kind"] == "dir":
-        return TYPES[mid]["root"]
-    src = get_source(mid)
-    base = REPO / "claude" if src == "claude" else REPO / src
-    return base / m["cfg"]
+def tilde(p):
+    return str(p).replace(str(Path.home()), "~", 1)
 
 def parse_frontmatter(text):
     meta = {}
@@ -158,3 +107,12 @@ def _read_json_object(path):
     except json.JSONDecodeError as e:
         return {}, str(e)
     return (data, None) if isinstance(data, dict) else ({}, "top level is not a JSON object")
+
+def atomic_write(path, content, mode=None):
+    """Write text via temp file + rename so readers never see partial content."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.claude-ui-tmp")
+    tmp.write_text(content)
+    if mode is not None:
+        tmp.chmod(mode)
+    tmp.replace(path)

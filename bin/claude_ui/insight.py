@@ -5,23 +5,22 @@ import json
 import re
 import time
 
-from .core import SKILLS, TYPES, mapping_repo, read_cfg
-from .items import scan_md, scan_skills
+from .core import ITEM_TYPES, config_dir, read_cfg
+from .items import scan_items
 
 
 def _tok(s):
     return (len(s) + 3) // 4 if s else 0
 
 def insight_budget():
-    claude_md = mapping_repo("CLAUDE.md")
+    claude_md = config_dir() / "CLAUDE.md"
     md_tok = _tok(claude_md.read_text(errors="replace")) if claude_md.is_file() else 0
     per_type = {}
-    for t, spec in TYPES.items():
-        items = (scan_skills(SKILLS, "active") if spec["kind"] == "dir"
-                 else scan_md(t, "active"))
+    for t in ITEM_TYPES:
+        items = scan_items(t)
         rows = [{"name": it["name"],
                  "tokens": _tok(it["name"]) + _tok(it.get("description", ""))}
-                for it in items if not it.get("broken")]
+                for it in items if it["enabled"] and not it.get("broken")]
         rows.sort(key=lambda r: -r["tokens"])
         per_type[t] = {"tokens": sum(r["tokens"] for r in rows), "items": rows}
     return {"claude_md": md_tok, "types": per_type,
@@ -224,6 +223,17 @@ def _row_cost(row, pin, pout):
     i, o, cw, cr = row[0], row[1], row[2], row[3]
     return (i * pin + o * pout + cw * pin * 1.25 + cr * pin * 0.1) / 1e6
 
+# Models dropped from the cost dashboard entirely (no row, no tokens, no total).
+# "<synthetic>" is Claude Code's placeholder for messages with no real API call;
+# user-configured substrings (e.g. local model ids) are matched case-insensitively.
+def _excluded(model):
+    m = (model or "").lower()
+    subs = ["<synthetic>"]
+    ex = read_cfg().get("exclude_models")
+    if isinstance(ex, list):
+        subs += [str(s).lower() for s in ex]
+    return any(s in m for s in subs if s)
+
 def cost_stats(rescan=False):
     st = transcript_stats(rescan)
     today = time.strftime("%Y-%m-%d", time.gmtime())
@@ -238,6 +248,8 @@ def cost_stats(rescan=False):
     for day in sorted(st["days"]):
         drow = {"day": day, "cost": 0, "by": {}}
         for model, row in st["days"][day].items():
+            if _excluded(model):
+                continue
             pin, pout, known = model_price(model)
             if not known:
                 unknown.add(model)
@@ -266,6 +278,7 @@ def cost_stats(rescan=False):
         per_day.append(drow)
     by_project = []
     for cwd, mrows in st["projects"].items():
+        mrows = {m: row for m, row in mrows.items() if not _excluded(m)}
         c = sum(_row_cost(row, *model_price(m)[:2]) for m, row in mrows.items())
         msgs = sum(row[4] for row in mrows.values())
         if msgs:

@@ -1,6 +1,6 @@
-let DATA = { types: {}, links: [], config_dir: "", collections: [] };
-let TAB = location.hash.slice(1) || "skills";
-let SORT = "name";
+let DATA = { config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
+const TABS = ["mcp", "statusline", "settings", "insight", "costs", "doctor"];
+let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "mcp";
 
 async function api(path, body) {
   const res = await fetch(path, body
@@ -168,47 +168,9 @@ function closeMenu() {
 
 const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-const STATUS_TEXT = {
-  linked: ["✓ linked", "ok"],
-  elsewhere: ["→ points elsewhere", "warn"],
-  real: ["real (link backs it up first)", "warn"],
-  adopt: ["real (link adopts it into the repo)", "warn"],
-  missing: ["not linked", "warn"],
-  absent: ["— nothing on either side", ""],
-};
+let CFGEDIT = false;
 
-function renderLinks() {
-  const box = document.getElementById("linkrows");
-  box.innerHTML = "";
-  let ok = 0, warn = 0;
-  for (const l of DATA.links) {
-    const [txt, cls] = STATUS_TEXT[l.status] || [l.status, ""];
-    if (l.status === "linked") ok++;
-    else if (l.status !== "absent") warn++;
-    const row = document.createElement("div");
-    row.className = "lrow";
-    const extra = l.points_to ? " (" + esc(l.points_to) + ")" : "";
-    const canLink = l.status !== "linked" && l.status !== "absent";
-    const canUnlink = l.status === "linked" || l.status === "elsewhere";
-    const canOpen = l.status !== "absent" && (l.status !== "missing" || l.repo_exists);
-    const src = l.candidates
-      ? `<select onchange="doSource('${l.id}', this.value)" title="which copy is linked">` +
-        l.candidates.map((c) =>
-          `<option value="${c.source}" ${c.source === l.source ? "selected" : ""}>` +
-          `${c.source === "claude" ? "shared" : esc(c.source)}${c.exists ? "" : " (none)"}</option>`).join("") +
-        "</select>"
-      : "";
-    row.innerHTML =
-      `<span class="lname">${esc(l.target)}</span>` + src +
-      `<span class="lstat ${cls}">${txt}${extra} · repo: ${esc(l.repo)}${l.repo_exists ? "" : " (missing)"}</span>` +
-      (l.kind === "file" ? `<button class="small" onclick="openEditor('${l.id}')">edit</button>` : "") +
-      (canOpen ? `<button class="small" onclick="doOpen('${l.id}')" title="open in the file manager">open</button>` : "") +
-      (canLink ? `<button class="small" onclick="doLink('${l.id}')">link</button>` : "") +
-      (canUnlink ? `<button class="small danger" onclick="doUnlink('${l.id}')">unlink</button>` : "");
-    box.appendChild(row);
-  }
-  document.getElementById("linksum").innerHTML =
-    ` — <span class="ok">${ok} linked</span>` + (warn ? `, <span class="warn">${warn} need attention</span>` : "");
+function renderHeader() {
   document.getElementById("cfgprefix").textContent = DATA.config_dir.replace(/\/?$/, "/");
   const row = document.getElementById("cfgrow");
   if (CFGEDIT) {
@@ -219,148 +181,15 @@ function renderLinks() {
       `<button class="small" onclick="CFGEDIT=false;render()">cancel</button>`;
   } else {
     row.innerHTML =
-      `<span>links are managed in <b>${esc(DATA.config_dir)}</b>` +
+      `<span>managing <b>${esc(DATA.config_dir)}</b>` +
       (DATA.default_dir ? " (the default — Claude Code reads this automatically)" : "") +
       `</span><span style="flex:1"></span>` +
-      `<button class="small" onclick="genBootstrap()" title="write a committable bootstrap.sh that links everything on a new machine">bootstrap.sh</button>` +
       `<button class="small" onclick="CFGEDIT=true;render()">change…</button>` +
-      (DATA.default_dir ? "" : `<button class="small" onclick="resetCfgDir()">reset to default</button>`) +
-      `<button class="small danger" onclick="resetLinks()" title="remove every managed symlink from the config dir and restore *.bak backups">reset links</button>`;
+      (DATA.default_dir ? "" : `<button class="small" onclick="resetCfgDir()">reset to default</button>`);
   }
   document.getElementById("cfghint").textContent = DATA.default_dir
     ? "" : "non-default config dir: Claude Code only uses it if CLAUDE_CONFIG_DIR is exported in your shell";
-  if (!renderLinks.seen) {  // auto-open only when something needs attention
-    renderLinks.seen = true;
-    document.getElementById("links").open = warn > 0;
-  }
 }
-
-let GITDIFF = {};
-
-function diffEl(text) {
-  const pre = document.createElement("pre");
-  pre.className = "diff";
-  for (const line of text.split("\n")) {
-    const s = document.createElement("span");
-    s.textContent = line + "\n";
-    if (line.startsWith("+")) s.className = "add";
-    else if (line.startsWith("-")) s.className = "del";
-    else if (line.startsWith("@@")) s.className = "hunk";
-    pre.appendChild(s);
-  }
-  return pre;
-}
-
-function renderGit() {
-  const g = DATA.git || { files: [], branch: "", error: null };
-  const sum = document.getElementById("gitsum");
-  sum.innerHTML = g.error
-    ? ' — <span class="warn">' + esc(g.error) + "</span>"
-    : g.files.length
-    ? ` — <span class="warn">${g.files.length} changed</span> on ${esc(g.branch)}`
-    : ` — <span class="ok">clean</span> on ${esc(g.branch)}`;
-  const el = document.getElementById("gitbody");
-  el.innerHTML = "";
-  if (g.error) return;
-  if (!g.files.length) {
-    el.innerHTML = '<div class="empty">working tree clean — nothing to commit</div>';
-    return;
-  }
-  const msgVal = el._msg || "";
-  for (const f of g.files) {
-    const row = document.createElement("div");
-    row.className = "lrow";
-    row.innerHTML =
-      `<span class="gxy">${esc(f.xy)}</span>` +
-      `<span class="lstat">${esc(f.path)}</span>`;
-    const b = document.createElement("button");
-    b.className = "small";
-    b.textContent = GITDIFF[f.path] !== undefined ? "hide" : "diff";
-    b.onclick = async () => {
-      if (GITDIFF[f.path] !== undefined) {
-        delete GITDIFF[f.path];
-        renderGit();
-        return;
-      }
-      try {
-        GITDIFF[f.path] = (await api("/api/git-diff", { path: f.path })).diff;
-        renderGit();
-      } catch (e) { toast(e.message, true); }
-    };
-    row.appendChild(b);
-    if (GITDIFF[f.path] !== undefined) row.appendChild(diffEl(GITDIFF[f.path]));
-    el.appendChild(row);
-  }
-  const bar = document.createElement("div");
-  bar.className = "cfgdir";
-  const inp = document.createElement("input");
-  inp.type = "text";
-  inp.id = "gitmsg";
-  inp.placeholder = "commit message — stages & commits everything above";
-  inp.value = msgVal;
-  inp.oninput = () => { el._msg = inp.value; };
-  bar.appendChild(inp);
-  const cb = document.createElement("button");
-  cb.className = "small primary";
-  cb.textContent = "commit all";
-  cb.onclick = async () => {
-    const msg = inp.value.trim();
-    if (!msg) { toast("commit message required", true); return; }
-    try {
-      const r = await api("/api/git-commit", { message: msg });
-      toast(r.result);
-      GITDIFF = {};
-      el._msg = "";
-      await refresh();
-    } catch (e) { toast(e.message, true); }
-  };
-  bar.appendChild(cb);
-  el.appendChild(bar);
-}
-
-async function doSource(id, source) {
-  try {
-    await api("/api/source", { id, source });
-    toast(id + " source → " + (source === "claude" ? "shared" : source));
-    await refresh();
-  } catch (e) { toast(e.message, true); await refresh(); }
-}
-
-async function doLink(id) {
-  try {
-    const r = await api("/api/link", { id });
-    toast(r.adopted ? "linked — existing content adopted into the repo (commit it!)"
-      : r.backup ? "linked — previous content saved at " + r.backup : "linked");
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function doUnlink(id) {
-  try { await api("/api/unlink", { id }); toast("unlinked"); await refresh(); }
-  catch (e) { toast(e.message, true); }
-}
-
-async function doOpen(id) {
-  try { await api("/api/open", { id }); }
-  catch (e) { toast(e.message, true); }
-}
-
-async function resetLinks() {
-  const linked = DATA.links.filter((l) => l.status === "linked" || l.status === "elsewhere");
-  if (!linked.length) { toast("nothing linked — already reset"); return; }
-  if (!(await mconfirm("reset links",
-    "Remove " + linked.length + " symlink(s) from " + DATA.config_dir +
-    " and restore *.bak backups where they exist. The repo keeps everything; " +
-    "Claude Code goes back to whatever was there before linking.", "reset"))) return;
-  try {
-    const r = await api("/api/reset-links", {});
-    toast("removed " + r.removed.length + " link(s)" +
-      (r.restored.length ? ", restored " + r.restored.length + " backup(s)" : ""));
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-let CFGEDIT = false;
 
 async function saveCfgDir() {
   const v = document.getElementById("cfgdir").value.trim();
@@ -377,8 +206,7 @@ async function resetCfgDir() {
   catch (e) { toast(e.message, true); }
 }
 
-const EXTRA_TABS = ["mcp", "statusline", "settings", "insight", "costs", "doctor"];
-const allTabs = () => [...Object.keys(DATA.types), ...EXTRA_TABS];
+const allTabs = () => TABS;
 
 function renderTabs() {
   const el = document.getElementById("tabs");
@@ -391,15 +219,11 @@ function renderTabs() {
       ? "mcp · " + ((DATA.mcp || {}).servers || []).length
       : t === "statusline"
       ? "statusline" + ((DATA.statusline || {}).applied ? " ✓" : "")
-      : t === "insight"
-      ? "insight"
-      : t === "costs"
-      ? "costs"
       : t === "doctor"
       ? "doctor" + (DOCTOR && DOCTOR.warns ? " · " + DOCTOR.warns + "⚠" : "")
-      : t + " · " + DATA.types[t].active.length;
+      : t;
     b.className = t === TAB ? "on" : "";
-    b.onclick = () => { TAB = t; BULK.clear(); location.hash = t; render(); };
+    b.onclick = () => { TAB = t; location.hash = t; render(); };
     el.appendChild(b);
   }
 }
@@ -538,10 +362,8 @@ function renderSettings() {
   const st = DATA.settings || {};
   el.innerHTML =
     `<div class="sethead">editing <b>${esc(st.path || "")}</b>` +
-    ` (source: ${st.source === "claude" ? "shared" : esc(st.source || "")}${st.exists ? "" : ", file will be created on first set"})` +
-    " · changes apply to new sessions" +
-    (st.linked ? "" : ' <span class="warn">— not linked into the config dir; link settings.json in the panel above for changes to take effect</span>') +
-    "</div>";
+    (st.exists ? "" : " (file will be created on first set)") +
+    " · changes apply to new sessions</div>";
   if (st.error) {
     const b = document.createElement("div");
     b.className = "banner warn";
@@ -662,16 +484,12 @@ function mcpSummary(cfg) {
 function mcpEditPanel() {
   const p = document.createElement("div");
   p.className = "mcppanel";
-  const srcs = ["claude", ...(DATA.collections || [])];
   p.innerHTML =
     `<div class="bar"><input type="text" id="mcpname" placeholder="server name"` +
     ` value="${esc(MCPEDIT.name || "")}" ${MCPEDIT.isNew ? "" : "disabled"}>` +
-    `<select id="mcpsource">` +
-    srcs.map((s) => `<option value="${s}" ${s === MCPEDIT.source ? "selected" : ""}>` +
-      `${s === "claude" ? "shared" : esc(s)}</option>`).join("") +
-    `</select><span style="flex:1"></span>` +
+    `<span style="flex:1"></span>` +
     (MCPEDIT.isNew ? "" :
-      `<button class="small danger" onclick="mcpDelete()">delete from repo</button>`) +
+      `<button class="small danger" onclick="mcpDelete()">delete</button>`) +
     `</div>`;
   const ta = document.createElement("textarea");
   ta.id = "mcpjson";
@@ -683,29 +501,10 @@ function mcpEditPanel() {
   bar.className = "bar";
   bar.style.marginTop = ".6rem";
   bar.innerHTML =
-    `<button class="primary" onclick="mcpSave()">save to repo</button>` +
+    `<button class="primary" onclick="mcpSave()">save</button>` +
     `<button onclick="MCPEDIT=null;render()">cancel</button>`;
   p.appendChild(bar);
   return p;
-}
-
-// Values in env/headers that look like real credentials, so saving them to a
-// committed source can warn first (work/ is gitignored; claude/ is not).
-function mcpSecretHits(cfg) {
-  const hits = [];
-  const scan = (obj) => {
-    if (!obj || typeof obj !== "object") return;
-    for (const [k, v] of Object.entries(obj)) {
-      if (typeof v !== "string") continue;
-      const placeholder = v === "" || v.includes("${");
-      if (placeholder) continue;
-      if (/token|secret|key|pass|auth/i.test(k) && v.length >= 8) hits.push(k);
-      else if (/^[A-Za-z0-9_-]{32,}$/.test(v)) hits.push(k);
-    }
-  };
-  scan(cfg.env);
-  scan(cfg.headers);
-  return hits;
 }
 
 async function mcpSave() {
@@ -713,78 +512,21 @@ async function mcpSave() {
   try { config = JSON.parse(document.getElementById("mcpjson").value); }
   catch (e) { toast("invalid JSON: " + e.message, true); return; }
   const name = (document.getElementById("mcpname").value || "").trim();
-  const source = document.getElementById("mcpsource").value;
-  const hits = source === "work" ? [] : mcpSecretHits(config);
-  if (hits.length && !(await mconfirm(
-    "possible secret in a committed file",
-    hits.join(", ") + " look(s) like a real credential, and " +
-    (source === "claude" ? "claude/" : source + "/") + " is committed to git. " +
-    'Consider "${ENV_VAR}" expansion or the gitignored work/ collection.',
-    "save anyway"))) return;
   try {
-    await api("/api/mcp-save", { name, source, config,
-      orig_source: MCPEDIT.isNew ? null : MCPEDIT.source });
-    toast(name + " saved to " + (source === "claude" ? "shared" : source) +
-      " — use apply to activate on this machine");
+    await api("/api/mcp-save", { name, config });
+    toast(name + " saved to " + DATA.mcp.machine_path + " — applies to new sessions");
     MCPEDIT = null;
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
 async function mcpDelete() {
-  const onMachine = ["applied", "differs"].includes(MCPEDIT.status);
-  const fields = onMachine
-    ? [{ id: "m", label: "this machine's ~/.claude.json", type: "select", options: [
-        { value: "", label: "keep the machine copy" },
-        { value: "1", label: "remove from the machine too" }] }]
-    : [];
-  const r = await modal({ title: "delete " + MCPEDIT.name,
-    text: "removes the repo definition", fields, ok: "delete", danger: true });
-  if (r === null) return;
+  if (!(await mconfirm("delete " + MCPEDIT.name,
+    "Removes it from " + DATA.mcp.machine_path + ".", "delete"))) return;
   try {
-    await api("/api/mcp-delete", { name: MCPEDIT.name, source: MCPEDIT.source,
-      from_machine: !!r.m });
+    await api("/api/mcp-delete", { name: MCPEDIT.name });
     toast(MCPEDIT.name + " deleted");
     MCPEDIT = null;
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function mcpApply(name) {
-  try {
-    const r = await api("/api/mcp-apply", { name });
-    toast(name === "*" ? r.applied + " server(s) applied to ~/.claude.json"
-      : name + " applied to ~/.claude.json");
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function mcpRemoveMachine(name) {
-  if (!(await mconfirm("remove " + name + " from this machine",
-    "Removes it from ~/.claude.json; the repo definition, if any, is kept.",
-    "remove"))) return;
-  try {
-    await api("/api/mcp-remove-machine", { name });
-    toast(name + " removed from machine");
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function mcpAdopt(name) {
-  const srcs = ["claude", ...(DATA.collections || [])];
-  let source = "claude";
-  if (srcs.length > 1) {
-    const r = await modal({ title: "adopt " + name,
-      text: "copies this machine's definition into the repo",
-      fields: [{ id: "s", label: "into source", type: "select",
-        options: srcs.map((s) => ({ value: s, label: s === "claude" ? "shared" : s })) }],
-      ok: "adopt" });
-    if (r === null) return;
-    source = r.s;
-  }
-  try {
-    await api("/api/mcp-adopt", { name, source });
-    toast(name + " adopted into the repo — commit it" + (source === "work" ? " (gitignored: stays local)" : ""));
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -796,7 +538,7 @@ async function mcpNew() {
       { value: "stdio", label: "stdio — local command" },
       { value: "http", label: "http/sse — remote URL" }] }], ok: "create" });
   if (!r || !r.n) return;
-  MCPEDIT = { name: r.n, source: "claude", isNew: true,
+  MCPEDIT = { name: r.n, isNew: true,
     json: JSON.stringify(MCP_TEMPLATE[r.k], null, 2) };
   render();
 }
@@ -804,53 +546,38 @@ async function mcpNew() {
 function renderMcp() {
   const el = document.getElementById("mcpview");
   const st = DATA.mcp || { servers: [] };
-  let head =
-    `<div class="sethead">server definitions live in the repo (shared <b>claude/${esc("mcp-servers.json")}</b>` +
-    ` or a collection's copy) and are <b>applied</b> per machine into <b>${esc(st.machine_path)}</b>` +
-    ` — Claude Code's user-scope MCP store${st.machine_exists ? "" : " (created on first apply)"}.</div>`;
-  el.innerHTML = head;
+  el.innerHTML =
+    `<div class="sethead">user-scope MCP servers in <b>${esc(st.machine_path)}</b>` +
+    ` — Claude Code's machine store${st.machine_exists ? "" : " (created on first save)"}.` +
+    " Changes apply to new sessions.</div>";
+  const machineOk = !st.machine_error;
   if (st.machine_error) {
     const b = document.createElement("div");
     b.className = "banner warn";
-    b.textContent = "~/.claude.json has invalid JSON — machine actions disabled. " + st.machine_error;
+    b.textContent = "~/.claude.json has invalid JSON — editing disabled; fix the file by hand. " + st.machine_error;
     el.appendChild(b);
   }
-  for (const e of st.errors || []) {
-    const b = document.createElement("div");
-    b.className = "banner warn";
-    b.textContent = e;
-    el.appendChild(b);
+  if (machineOk) {
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.innerHTML =
+      `<span style="flex:1"></span>` +
+      `<button class="primary" onclick="mcpNew()">+ add server</button>`;
+    el.appendChild(bar);
+    if (MCPEDIT) el.appendChild(mcpEditPanel());
   }
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  bar.innerHTML =
-    `<span style="flex:1"></span>` +
-    `<button onclick="mcpApply('*')">apply all</button>` +
-    `<button class="primary" onclick="mcpNew()">+ add server</button>`;
-  el.appendChild(bar);
-  if (MCPEDIT) el.appendChild(mcpEditPanel());
   if (!st.servers.length) {
     const d = document.createElement("div");
     d.className = "empty";
-    d.textContent = "no MCP servers defined or on this machine";
+    d.textContent = "no MCP servers on this machine";
     el.appendChild(d);
     return;
   }
-  const machineOk = !st.machine_error;
   for (const s of st.servers) {
     const row = document.createElement("div");
     row.className = "row";
-    const srcBadge = s.source
-      ? `<span class="badge group">${s.source === "claude" ? "shared" : esc(s.source)}</span>`
-      : "";
-    const statusBadge = {
-      applied: '<span class="badge ok">applied</span>',
-      "repo-only": '<span class="badge link">not on this machine</span>',
-      "machine-only": '<span class="badge local">machine only</span>',
-      differs: '<span class="badge warn">differs from machine</span>',
-    }[s.status] || "";
     row.innerHTML =
-      `<span class="name">${esc(s.name)}</span>` + srcBadge + statusBadge +
+      `<span class="name">${esc(s.name)}</span>` +
       `<span class="desc">${esc(mcpSummary(s.config))}</span>`;
     const act = document.createElement("span");
     act.className = "actions";
@@ -861,19 +588,13 @@ function renderMcp() {
       b.onclick = fn;
       act.appendChild(b);
     };
-    if (s.source)
+    btn("test", () => mcpTest(s.name));
+    if (machineOk)
       btn("edit", () => {
-        MCPEDIT = { name: s.name, source: s.source, status: s.status,
-          isNew: false, json: JSON.stringify(s.config, null, 2) };
+        MCPEDIT = { name: s.name, isNew: false,
+          json: JSON.stringify(s.config, null, 2) };
         render();
       });
-    btn("test", () => mcpTest(s.name));
-    if (machineOk && s.source && (s.status === "repo-only" || s.status === "differs"))
-      btn("apply", () => mcpApply(s.name));
-    if (machineOk && (s.status === "machine-only" || s.status === "differs"))
-      btn("adopt", () => mcpAdopt(s.name));
-    if (machineOk && s.status !== "repo-only")
-      btn("remove from machine", () => mcpRemoveMachine(s.name), "danger");
     row.appendChild(act);
     el.appendChild(row);
   }
@@ -1417,7 +1138,7 @@ async function renderInsight(rescan) {
   const now = Date.now();
   const unused = [];
   for (const [t, kind] of Object.entries(USAGE_KIND)) {
-    for (const s of (DATA.types[t] || {}).active || []) {
+    for (const s of ((b.types[t] || {}).items) || []) {
       const rec = (used[kind] || {})[s.name];
       const last = rec && rec.last ? Date.parse(rec.last) : 0;
       if (!last || now - last > 90 * 86400000)
@@ -1715,21 +1436,6 @@ async function renderDoctor(rerun) {
       `<span class="badge ${f.level === "warn" ? "warn" : "link"}">${f.level}</span>` +
       `<span class="badge group">${esc(f.area)}</span>` +
       `<span class="dmsg">${esc(f.msg)}</span>`;
-    if (f.fix) {
-      const b = document.createElement("button");
-      b.className = "small danger";
-      b.textContent = "fix";
-      b.title = f.fix.action + " " + (f.fix.path || "");
-      b.onclick = async () => {
-        if (!(await mconfirm("apply fix", f.fix.action + ": " + (f.fix.path || ""), "fix"))) return;
-        try {
-          await api("/api/doctor-fix", f.fix);
-          toast("fixed");
-          renderDoctor(true);
-        } catch (e) { toast(e.message, true); }
-      };
-      row.appendChild(b);
-    }
     el.appendChild(row);
   }
 }
@@ -1740,20 +1446,14 @@ let PAL = null;
 
 function palItems() {
   const out = [];
-  for (const [t, d] of Object.entries(DATA.types || {}))
-    for (const s of d.active || [])
-      if (!s.broken)
-        out.push({ kind: t.replace(/s$/, ""), label: s.name,
-          hint: s.description || "",
-          run: () => openItemEditor("active", s.name, null, t) });
   for (const t of allTabs())
     out.push({ kind: "go to", label: t,
       run: () => { TAB = t; location.hash = t; render(); } });
-  for (const t of Object.keys(DATA.types || {}))
-    out.push({ kind: "action", label: "new " + t.replace(/s$/, ""),
-      run: () => { TAB = t; location.hash = t; render(); newItem(); } });
+  for (const id of ["CLAUDE.md", "settings.json", "keybindings.json"])
+    out.push({ kind: "edit", label: id, run: () => openEditor(id) });
+  out.push({ kind: "action", label: "add mcp server",
+    run: () => { TAB = "mcp"; location.hash = TAB; render(); mcpNew(); } });
   out.push({ kind: "action", label: "toggle light/dark theme", run: toggleTheme });
-  out.push({ kind: "action", label: "apply all mcp servers", run: () => mcpApply("*") });
   out.push({ kind: "action", label: "run doctor",
     run: () => { TAB = "doctor"; location.hash = TAB; render(); renderDoctor(true); } });
   out.push({ kind: "action", label: "rescan usage analytics",
@@ -1846,50 +1546,11 @@ function openPalette() {
   inp.focus();
 }
 
-function renderGroups() {
-  const el = document.getElementById("groups");
-  const gs = (DATA.types[TAB] || {}).group_info || [];
-  if (!gs.length) { el.hidden = true; return; }
-  el.hidden = false;
-  el.textContent = "folders: ";
-  for (const g of gs) {
-    const chip = document.createElement("span");
-    chip.className = "chip" + (g.collection ? " coll" : "");
-    let warn = "";
-    if (!g.members) warn = "empty";
-    else if (g.incomplete) warn = g.incomplete + " missing SKILL.md";
-    if (g.loose_files) warn += (warn ? ", " : "") + g.loose_files + " loose files";
-    chip.innerHTML =
-      esc(g.name) + "/ · " + g.members + (g.collection ? " (collection)" : "") +
-      (warn ? ' <span class="warn">⚠ ' + esc(warn) + "</span>" : "") +
-      (g.collection
-        ? ` <a href="/api/export?collection=${encodeURIComponent(g.name)}"` +
-          ` style="color:var(--blue)" title="export collection as zip">⤓</a>`
-        : "") +
-      (g.removable
-        ? ` <a href="#" onclick="removeGroup('${g.name}');return false"` +
-          ` title="${g.members || g.loose_files ? "remove folder…" : "remove empty folder"}">×</a>`
-        : "");
-    el.appendChild(chip);
-  }
-}
-
 let EDITING = null;
 
 async function openEditor(id) {
   try {
     EDITING = await api("/api/file?id=" + encodeURIComponent(id));
-    render();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function openItemEditor(scope, name, file, type) {
-  const t = type || TAB;
-  try {
-    const q = "type=" + encodeURIComponent(t) + "&scope=" + encodeURIComponent(scope) +
-      "&name=" + encodeURIComponent(name) +
-      (file ? "&file=" + encodeURIComponent(file) : "");
-    EDITING = { item: true, ...(await api("/api/item?" + q)) };
     render();
   } catch (e) { toast(e.message, true); }
 }
@@ -1954,16 +1615,6 @@ function edSync() {
   if (ta) EDITING.content = ta.value;
 }
 
-async function edHistory() {
-  edSync();
-  try {
-    const r = await api("/api/history", { path: EDITING.path });
-    EDITING.hist = r.commits;
-    if (!r.commits.length) toast("no git history for " + EDITING.path);
-    render();
-  } catch (e) { toast(e.message, true); }
-}
-
 async function edAssist() {
   edSync();
   const r = await modal({ title: "✨ ask claude",
@@ -1991,50 +1642,10 @@ function renderEditor() {
   const f = EDITING;
   el.innerHTML =
     `<div class="sethead">editing <b>${esc(f.path)}</b>` +
-    (f.item
-      ? (f.exists ? "" : " (new file — created on save)")
-      : ` (source: ${f.source === "claude" ? "shared" : esc(f.source)}${f.exists ? "" : ", new file"})`) +
+    (f.exists ? "" : " (new file — created on save)") +
     (f.id === "CLAUDE.md" || f.id === "settings.json" ? " · applies to new sessions" : "") +
-    (f.viewingRev ? ` <span class="warn">— viewing ${esc(f.viewingRev.slice(0, 8))} from git history; save to restore this version</span>` : "") +
     `</div>`;
-  if (f.item && f.files && f.files.length > 1) {
-    const tabs = document.createElement("div");
-    tabs.className = "ftabs";
-    for (const name of f.files) {
-      const b = document.createElement("button");
-      b.className = "small" + (name === f.file ? " on" : "");
-      b.textContent = name;
-      b.onclick = () => { openItemEditor(f.scope, f.name, name, f.type); };
-      tabs.appendChild(b);
-    }
-    el.appendChild(tabs);
-  }
-  if (f.hist) {
-    const hp = document.createElement("div");
-    hp.className = "ftabs";
-    for (const c of f.hist.slice(0, 12)) {
-      const b = document.createElement("button");
-      b.className = "small" + (f.viewingRev === c.rev ? " on" : "");
-      b.textContent = c.date + " · " + c.subject.slice(0, 44);
-      b.title = c.rev;
-      b.onclick = async () => {
-        try {
-          const r = await api("/api/history-show", { rev: c.rev, path: f.path });
-          f.content = r.content;
-          f.viewingRev = c.rev;
-          render();
-        } catch (e) { toast(e.message, true); }
-      };
-      hp.appendChild(b);
-    }
-    const x = document.createElement("button");
-    x.className = "small";
-    x.textContent = "× close history";
-    x.onclick = () => { edSync(); delete f.hist; delete f.viewingRev; render(); };
-    hp.appendChild(x);
-    el.appendChild(hp);
-  }
-  const isMd = (f.item ? f.file : f.path || "").endsWith(".md");
+  const isMd = (f.path || "").endsWith(".md");
   if (f.preview && isMd) {
     const pv = document.createElement("div");
     pv.className = "mdprev";
@@ -2094,7 +1705,6 @@ function renderEditor() {
       f.preview = !f.preview;
       render();
     }, f.preview ? "small on" : "small");
-  btn("history", edHistory, "small", "git history of this file — view & restore old versions");
   btn("✨ assist", edAssist, "small", "ask Claude (via the claude CLI) to improve or review this file");
   btn("close", closeEditor);
   el.appendChild(bar);
@@ -2102,22 +1712,10 @@ function renderEditor() {
 
 async function saveFile() {
   edSync();
-  const content = EDITING.content;
   try {
-    if (EDITING.item) {
-      await api("/api/item-save", { type: EDITING.type, scope: EDITING.scope,
-        name: EDITING.name, file: EDITING.file, content });
-    } else {
-      await api("/api/file-save", { id: EDITING.id, content });
-    }
+    await api("/api/file-save", { id: EDITING.id, content: EDITING.content });
     toast(EDITING.path + " saved");
     EDITING.exists = true;
-    if (EDITING.viewingRev) {
-      delete EDITING.viewingRev;
-      render();
-    }
-    if (EDITING.item && EDITING.files && !EDITING.files.includes(EDITING.file))
-      EDITING.files.push(EDITING.file);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -2128,990 +1726,36 @@ function closeEditor() {
 
 function render() {
   closeMenu();
-  renderLinks();
-  renderGit();
+  renderHeader();
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
     insight: "insightview", costs: "costsview", doctor: "doctorview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   if (isEditor) {
-    document.getElementById("itemsview").hidden = true;
     for (const v of Object.values(views)) document.getElementById(v).hidden = true;
     renderEditor();
     return;
   }
   for (const [t, v] of Object.entries(views))
     document.getElementById(v).hidden = TAB !== t;
-  document.getElementById("itemsview").hidden = TAB in views;
   if (TAB === "settings") { renderSettings(); return; }
   if (TAB === "mcp") { renderMcp(); return; }
   if (TAB === "statusline") { renderStatusline(); return; }
   if (TAB === "insight") { renderInsight(); return; }
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
-  renderGroups();
-  const q = document.getElementById("q").value.toLowerCase();
-  const data = DATA.types[TAB] || { active: [], archived: [] };
-  for (const scope of ["active", "archived"]) {
-    const items = data[scope].filter(
-      (s) => !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q)
-    );
-    items.sort(SORT === "recent"
-      ? (a, b) => (b.mtime || 0) - (a.mtime || 0)
-      : (a, b) => a.name.localeCompare(b.name));
-    document.getElementById("n-" + scope).textContent = "· " + data[scope].length;
-    const box = document.getElementById(scope);
-    box.innerHTML = "";
-    if (!items.length) {
-      box.innerHTML = '<div class="empty">' + (q ? "no matches" : "nothing here") + "</div>";
-      continue;
-    }
-    for (const s of items) {
-      const row = document.createElement("div");
-      row.className = "row " + scope;
-      const badges =
-        (s.group ? `<span class="badge group">${esc(s.group)}/</span>` : "") +
-        (s.local ? '<span class="badge local">gitignored</span>' : "") +
-        (s.symlink && !s.managed ? '<span class="badge link">symlink</span>' : "") +
-        (s.broken ? '<span class="badge warn">broken</span>' : "") +
-        (s.incomplete && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "") +
-        (s.todo ? '<span class="badge warn" title="leftover TODO placeholder inside">TODO</span>' : "") +
-        (s.name_mismatch ? '<span class="badge warn" title="frontmatter name: does not match the folder name">name≠dir</span>' : "") +
-        (s.long_desc ? '<span class="badge warn" title="description over 1024 characters — may be truncated">long desc</span>' : "");
-      row.innerHTML =
-        `<span class="name" title="${esc(s.path || "")}">${esc(s.name)}</span>` + badges +
-        `<span class="desc">${esc(s.description || "")}</span>`;
-      const key = scope + "\t" + s.name;
-      const ck = document.createElement("input");
-      ck.type = "checkbox";
-      ck.title = "select for bulk actions";
-      ck.checked = BULK.has(key);
-      ck.onchange = () => {
-        if (ck.checked) BULK.add(key);
-        else BULK.delete(key);
-        renderBulkBar();
-      };
-      row.prepend(ck);
-      const act = document.createElement("span");
-      act.className = "actions";
-      const btn = (label, fn, cls, title) => {
-        const b = document.createElement("button");
-        b.textContent = label;
-        if (cls) b.className = cls;
-        if (title) b.title = title;
-        b.onclick = fn;
-        act.appendChild(b);
-      };
-      if (!s.broken) btn("edit", () => openItemEditor(scope, s.name));
-      const entries = [];
-      if (s.movable) {
-        entries.push({ label: "move…", fn: () => moveToGroup(s.name) });
-        entries.push({ label: "rename…", fn: () => renameItem(s.name) });
-        entries.push({ label: "duplicate…", fn: () => duplicateItem(s.name) });
-      }
-      if (!s.broken)
-        entries.push({ label: "export zip", fn: () => {
-          location.href = "/api/export?type=" + encodeURIComponent(TAB) +
-            "&scope=" + scope + "&name=" + encodeURIComponent(s.name);
-        } });
-      entries.push(scope === "active"
-        ? { label: "archive", fn: () => doAct("archive", s.name) }
-        : { label: "restore", fn: () => doAct("restore", s.name) });
-      entries.push({ label: "delete…", danger: true,
-        fn: () => doDelete(scope, s.name, s.managed) });
-      btn("⋯", (e) => { e.stopPropagation(); openMenu(e.currentTarget, entries); },
-        null, "move, rename, duplicate, export, archive, delete");
-      row.appendChild(act);
-      box.appendChild(row);
-    }
-  }
-  renderBulkBar();
-}
-
-const BULK = new Set();
-
-function renderBulkBar() {
-  const el = document.getElementById("bulkbar");
-  el.hidden = BULK.size === 0;
-  el.innerHTML = "";
-  if (!BULK.size) return;
-  const lbl = document.createElement("span");
-  lbl.style.cssText = "align-self:center;font-size:.8rem;color:var(--fg2)";
-  lbl.textContent = BULK.size + " selected";
-  el.appendChild(lbl);
-  const btn = (label, fn, cls) => {
-    const b = document.createElement("button");
-    b.className = "small" + (cls ? " " + cls : "");
-    b.textContent = label;
-    b.onclick = fn;
-    el.appendChild(b);
-  };
-  const parts = () => [...BULK].map((k) => {
-    const i = k.indexOf("\t");
-    return { scope: k.slice(0, i), name: k.slice(i + 1) };
-  });
-  const run = async (fn, done) => {
-    let ok = 0, fail = 0;
-    for (const p of parts()) {
-      try { await fn(p); ok++; }
-      catch (e) { fail++; toast(p.name + ": " + e.message, true); }
-    }
-    BULK.clear();
-    toast(done + " " + ok + " item(s)" + (fail ? ", " + fail + " failed" : ""), !!fail);
-    await refresh();
-  };
-  btn("archive", () => run(async (p) => {
-    if (p.scope === "active") await api("/api/archive", { type: TAB, name: p.name });
-  }, "archived"));
-  btn("restore", () => run(async (p) => {
-    if (p.scope === "archived") await api("/api/restore", { type: TAB, name: p.name });
-  }, "restored"));
-  btn("delete", async () => {
-    if (!(await mconfirm("delete " + BULK.size + " item(s)",
-      "All moved to archive/trash (undoable via doctor until purged).", "delete"))) return;
-    run((p) => api("/api/delete", { type: TAB, scope: p.scope, name: p.name }), "deleted");
-  }, "danger");
-  btn("clear", () => { BULK.clear(); render(); });
 }
 
 async function refresh() {
   DATA = await api("/api/state");
-  if (!EXTRA_TABS.includes(TAB) && !DATA.types[TAB]) TAB = Object.keys(DATA.types)[0];
+  if (!TABS.includes(TAB)) TAB = "mcp";
   render();
 }
 
-async function doAct(action, name) {
-  try {
-    await api("/api/" + action, { type: TAB, name });
-    toast(name + (action === "archive" ? " → archive/" : " restored"));
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function moveToGroup(name) {
-  const gs = (DATA.types[TAB] || {}).groups || [];
-  const fields = [{ id: "g", label: "into folder / collection", type: "select",
-    options: [{ value: "", label: "(top level)" },
-      ...gs.map((g) => ({ value: g, label: g + "/" }))] }];
-  if (TAB !== "skills")
-    fields.push({ id: "n", label: "…or a new folder",
-      placeholder: "leave empty to use the pick above" });
-  const r = await modal({ title: "move " + name, fields, ok: "move" });
-  if (r === null) return;
-  try {
-    const res = await api("/api/move", { type: TAB, name, group: r.n || r.g || "" });
-    toast(name + " → " + res.name);
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function renameItem(name) {
-  const r = await modal({ title: "rename " + name,
-    text: TAB === "skills"
-      ? "a '<group>-' prefix files it into that group"
-      : "use folder/name to move it while renaming",
-    fields: [{ id: "n", label: "new name", value: name }], ok: "rename" });
-  if (!r || !r.n || r.n === name) return;
-  try {
-    const res = await api("/api/rename", { type: TAB, name, new_name: r.n });
-    toast(name + " → " + res.name);
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function duplicateItem(name) {
-  const r = await modal({ title: "duplicate " + name,
-    fields: [{ id: "n", label: "copy's name", value: name + "-copy" }],
-    ok: "duplicate" });
-  if (!r || !r.n) return;
-  try {
-    const res = await api("/api/duplicate", { type: TAB, name, new_name: r.n });
-    toast(name + " copied to " + res.name);
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function importUrl() {
-  const r = await modal({ title: "import from GitHub",
-    text: "repo root, branch, or subdir URL — a config-shaped repo (skills/, commands/, CLAUDE.md…) imports as a collection",
-    fields: [
-      { id: "u", label: "URL",
-        placeholder: "https://github.com/owner/repo[/tree/branch[/subdir]]" },
-      { id: "n", label: TAB === "skills"
-        ? "import as (skill / group / collection name)"
-        : "import into (folder or collection name)" }],
-    ok: "import" });
-  if (!r || !r.u || !r.n) return;
-  toast("downloading " + r.u + "…");
-  try {
-    const res = await api("/api/import-url", { url: r.u, name: r.n, type: TAB });
-    toast("imported " + res.kind + " " + res.path + " (" + res.files + " files)");
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function genBootstrap() {
-  try {
-    const r = await api("/api/bootstrap", {});
-    toast(r.path + " written — commit it; on a new machine, clone + ./bootstrap.sh links everything and applies MCP servers");
-  } catch (e) { toast(e.message, true); }
-}
-
-async function newGroup() {
-  const r = await modal({ title: "new folder", text: "'work' stays out of git",
-    fields: [{ id: "n", label: "name" }], ok: "create" });
-  if (!r || !r.n) return;
-  try {
-    await api("/api/group", { type: TAB, name: r.n });
-    toast(r.n + "/ created — use move to file items into it");
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function removeGroup(name) {
-  const gs = (DATA.types[TAB] || {}).group_info || [];
-  const g = gs.find((x) => x.name === name) || {};
-  const n = (g.members || 0) + (g.loose_files || 0);
-  let mode = "";
-  if (n) {
-    const r = await modal({ title: "remove " + name + "/",
-      text: "the folder still has " + n + " item" + (n === 1 ? "" : "s"),
-      fields: [{ id: "m", label: "what happens to the contents", type: "select",
-        options: [
-          { value: "disband", label: "move to top level, then remove the folder" },
-          { value: "delete", label: "delete folder and contents (to trash, undoable)" }] }],
-      ok: "remove", danger: true });
-    if (!r) return;
-    mode = r.m;
-  }
-  try {
-    const res = await api("/api/group-remove", { type: TAB, name, mode });
-    if (res && res.trash) {
-      toast(name + "/ deleted", false, { label: "undo", fn: async () => {
-        try {
-          await api("/api/undelete", { token: res.trash });
-          toast(name + "/ restored");
-          await refresh();
-        } catch (e) { toast(e.message, true); }
-      } });
-    } else {
-      toast(name + "/ removed" +
-        (mode === "disband" ? " — contents moved to top level" : ""));
-    }
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function doDelete(scope, name, managed) {
-  const msg = managed
-    ? "Deletes " + name + " and the files inside its folder (moved to archive/trash, undoable)."
-    : "Deletes " + name + " (moved to archive/trash, undoable; a symlink's target is untouched).";
-  if (!(await mconfirm("delete " + name, msg, "delete"))) return;
-  try {
-    const res = await api("/api/delete", { type: TAB, scope, name });
-    if (res.trash) {
-      toast(name + " deleted", false, { label: "undo", fn: async () => {
-        try {
-          await api("/api/undelete", { token: res.trash });
-          toast(name + " restored");
-          await refresh();
-        } catch (e) { toast(e.message, true); }
-      } });
-    } else {
-      toast(name + " deleted");
-    }
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-// ---- skill wizard ----------------------------------------------------------
-// Step-by-step SKILL.md builder replacing the bare name prompt for skills.
-// It bakes in the skill-authoring guidance from the Claude Code docs: the
-// description is the only part Claude sees when deciding whether to use a
-// skill (so it must carry the "use when" triggers), the body should stay lean
-// because it sits in context for the rest of the session once invoked, and
-// bulky detail belongs in references/ files loaded on demand.
-
-const WIZ_KEY = "claude-ui-skill-wizard";
-const WIZ_STEPS = ["name", "description", "body", "extras", "review"];
-
-const WIZ_TPLS = {
-  workflow: { label: "workflow",
-    hint: "repeatable multi-step process — deploy, review, release",
-    body: (t) => "# " + t + "\n\nOne sentence on the goal and why it matters.\n\n" +
-      "## Steps\n\n1. First step — imperative and concrete.\n2. Next step.\n" +
-      "3. Verify: how to tell it worked.\n\n" +
-      "## Output\n\nDescribe exactly what the final output should look like.\n" },
-  reference: { label: "reference",
-    hint: "conventions or a style guide Claude should follow",
-    body: (t) => "# " + t + "\n\nConventions to follow whenever this topic comes up.\n\n" +
-      "## Rules\n\n- A rule — and the reason behind it (reasons beat bare MUSTs).\n\n" +
-      "## Examples\n\nGood: …\nBad: …\n" },
-  tool: { label: "tool wrapper",
-    hint: "wraps a script or CLI so Claude stops improvising",
-    body: (t) => "# " + t + "\n\nPrefer the command below over ad-hoc versions.\n\n" +
-      "## Usage\n\n```bash\n<command here>\n```\n\n" +
-      "## Notes\n\n- What to do when it fails.\n" },
-  migration: { label: "migration",
-    hint: "pattern-based codemod — old API/component → new, one unit at a time",
-    body: (t) => "# " + t + "\n\nMigrate one <component/module> from <old system> to <new system> " +
-      "using the documented patterns — apply them mechanically, don't redesign.\n\n" +
-      "## Steps\n\n" +
-      "1. Identify which pattern category the target falls into " +
-      "(see references/patterns.md), then read only that section.\n" +
-      "2. Apply the before → after transform exactly. Don't \"improve\" adjacent " +
-      "code — consistency across the migration matters more than local polish.\n" +
-      "3. Verify: <build / test / lint command for one unit>.\n" +
-      "4. Grep for leftovers that must not survive: <old import path>, <deprecated prop>.\n" +
-      "5. Record the unit as migrated in <ledger location>.\n\n" +
-      "## When no pattern matches\n\n" +
-      "Don't invent a new pattern. Find the 2–3 most similar already-migrated " +
-      "units in the ledger and study their real transforms " +
-      "(`git log --follow <file>`), then stop and flag the novel case for a " +
-      "human decision before proceeding.\n" },
-  blank: { label: "blank", hint: "start from nothing",
-    body: (t) => "# " + t + "\n\n" },
-};
-
-// Worked examples for the description step — each is a complete what/when/
-// phrases trio the user can adopt as a starting point.
-const WIZ_EXAMPLES = [
-  { label: "commit messages (workflow)",
-    what: "Writes a conventional-commit message from the staged diff",
-    when: "the user asks for a commit message, says \"commit this\", or wants staged changes summarized",
-    phrases: ["write a commit message", "commit this for me"] },
-  { label: "API conventions (reference)",
-    what: "Enforces this repo's REST conventions: plural-noun routes, cursor pagination, RFC 7807 errors",
-    when: "adding or reviewing an API endpoint, or writing an OpenAPI spec",
-    phrases: ["add an endpoint", "does this API look right"] },
-  { label: "app screenshots (tool wrapper)",
-    what: "Builds the app and captures simulator screenshots via scripts/snap.sh",
-    when: "the user wants to see the app, verify a UI change, or asks for a screenshot",
-    phrases: ["show me the app", "screenshot the login screen"] },
-  { label: "component migration (migration)",
-    what: "Migrates a component from OldSystem to NewSystem using the documented before/after patterns",
-    when: "migrating, converting, or updating a component, or touching any file that still imports from the old package — even if the user doesn't say \"migrate\"",
-    phrases: ["migrate the Button component", "convert this to the new design system"] },
-];
-
-// Markdown sections the body step can append with one click.
-const WIZ_SNIPPETS = {
-  "steps": "## Steps\n\n1. First step — imperative and concrete.\n2. Next step.\n3. Verify: how to tell it worked.\n",
-  "output format": "## Output\n\nALWAYS produce exactly this shape:\n\n# <title>\n## Summary — two sentences max\n## Details\n",
-  "examples": "## Examples\n\n**Example 1:**\nInput: Added user authentication with JWT tokens\nOutput: feat(auth): implement JWT-based authentication\n",
-  "common mistakes": "## Common mistakes\n\n- The mistake — why it's wrong and what to do instead.\n",
-};
-
-const WIZ_TOOL_PRESETS = [
-  ["read-only", "Read Grep Glob"],
-  ["git", "Bash(git status *) Bash(git diff *) Bash(git log *)"],
-  ["gh pr", "Bash(gh pr view *) Bash(gh pr diff *)"],
-  ["web", "WebFetch WebSearch"],
-];
-const WIZ_REF_IDEAS = ["examples.md", "checklist.md", "api-reference.md", "troubleshooting.md",
-  "patterns.md", "edge-cases.md"];
-const WIZ_ARG_IDEAS = ["[issue-number]", "[file] [format]", "[branch]"];
-
-const wizBlank = () => ({ step: 0, name: "", group: "", what: "", when: "",
-  phrases: [], tpl: "", body: "", touched: false, refs: [],
-  manual: false, hidden: false, tools: "", arghint: "" });
-
-function wizLoad() {
-  try {
-    const d = JSON.parse(localStorage.getItem(WIZ_KEY));
-    return d && typeof d === "object" ? { ...wizBlank(), ...d } : null;
-  } catch (e) { return null; }
-}
-const wizSave = (w) => { try { localStorage.setItem(WIZ_KEY, JSON.stringify(w)); } catch (e) {} };
-const wizClear = () => { try { localStorage.removeItem(WIZ_KEY); } catch (e) {} };
-
-const wizName = (w) => (w.group ? w.group + "-" : "") + w.name;
-
-function wizTaken(full) {
-  const t = DATA.types.skills || {};
-  return [...(t.active || []), ...(t.archived || [])].some((it) => it.name === full)
-    || (t.groups || []).includes(full);
-}
-
-// Compose the frontmatter description from its three ingredients. Keeping them
-// separate in the form (what / when / phrases) lets the UI lint each part.
-function wizDesc(w) {
-  let d = w.what.trim();
-  if (d && !/[.!?]$/.test(d)) d += ".";
-  const when = w.when.trim().replace(/^use (it |this )?when\s*/i, "");
-  if (when) d += (d ? " " : "") + "Use when " + when + (/[.!?]$/.test(when) ? "" : ".");
-  if (w.phrases.length)
-    d += " Trigger phrases: " + w.phrases.map((p) => '"' + p + '"').join(", ") + ".";
-  return d.trim();
-}
-
-function wizSkillMd(w) {
-  const q = (s) => '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
-  const fm = ["---", "name: " + wizName(w), "description: " + q(wizDesc(w) || "TODO")];
-  if (w.arghint) fm.push("argument-hint: " + w.arghint);
-  if (w.tools) fm.push("allowed-tools: " + w.tools);
-  if (w.manual) fm.push("disable-model-invocation: true");
-  if (w.hidden) fm.push("user-invocable: false");
-  fm.push("---", "");
-  let body = w.body.trim()
-    ? w.body.replace(/\s+$/, "") + "\n"
-    : WIZ_TPLS.blank.body(wizName(w) || "skill");
-  if (w.refs.length)
-    body += "\n## References\n\nLoaded on demand — read when the task needs the detail:\n\n" +
-      w.refs.map((r) => "- [references/" + r + "](references/" + r +
-        ") — TODO: say when to read this").join("\n") + "\n";
-  return fm.join("\n") + body;
-}
-
-function wizLint(w) {
-  const out = [];
-  const add = (level, msg) => out.push({ level, msg });
-  const full = wizName(w);
-  if (!w.name) add("bad", "needs a name");
-  else if (!/^[a-z0-9][a-z0-9-]*$/.test(w.name))
-    add("bad", "name should be kebab-case: lowercase letters, digits, dashes");
-  else if (wizTaken(full)) add("bad", full + " already exists");
-  else add("ok", "will be invoked as /" + full);
-  const desc = wizDesc(w);
-  if (!w.what.trim())
-    add("bad", "description is empty — it's the only thing Claude sees before deciding to use the skill");
-  else add("ok", "description present (" + desc.length + " chars)");
-  if (/(^|\s)(I|my|we|our)(\s|$)/.test(w.what))
-    add("warn", 'write the description in third person ("Reviews…", not "I review…")');
-  if (/\b(stuff|things|helps? with|various)\b/i.test(w.what))
-    add("warn", "vague wording — name the concrete task");
-  if (!w.when.trim())
-    add("warn", 'no "use when" triggers — skills without them tend to under-trigger');
-  if (!w.phrases.length)
-    add("warn", "no trigger phrases — a couple of realistic user phrasings improve matching");
-  if (desc.length > 1536)
-    add("bad", "description over the 1536-char cap — it will be truncated");
-  else if (desc.length > 600)
-    add("warn", "long description (" + desc.length + " chars) crowds the skill listing");
-  if (!w.body.trim()) add("warn", "body is empty — the skill will be a stub");
-  else if (/TODO/.test(w.body)) add("warn", "body still contains TODOs");
-  if (w.body.split("\n").length > 500)
-    add("warn", "body over the ~500-line guideline — move detail into references/ files");
-  if (w.manual && w.hidden)
-    add("bad", "manual-only + hidden from the / menu means nobody can invoke it");
-  return out;
-}
-
-function wizB64(s) {
-  const buf = new TextEncoder().encode(s);
-  let bin = "";
-  for (const b of buf) bin += String.fromCharCode(b);
-  return btoa(bin);
-}
-
-function skillWizard() {
-  const m = document.getElementById("modal");
-  let w = wizLoad() || wizBlank();
-  let exOpen = false;
-  const hadDraft = !!(w.name || w.what || w.body);
-  const el = (tag, cls, text) => {
-    const e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text !== undefined) e.textContent = text;
-    return e;
-  };
-  const close = () => {
-    m.hidden = true;
-    m.innerHTML = "";
-    document.removeEventListener("keydown", onkey, true);
-  };
-  const onkey = (e) => {
-    if (e.key === "Escape") { e.stopPropagation(); wizSave(w); close(); }
-  };
-  document.addEventListener("keydown", onkey, true);
-  m.onclick = (e) => { if (e.target === m) { wizSave(w); close(); } };
-  m.hidden = false;
-
-  const input = (value, ph, fn) => {
-    const i = document.createElement("input");
-    i.type = "text"; i.value = value;
-    if (ph) i.placeholder = ph;
-    i.oninput = () => { fn(i.value); wizSave(w); };
-    return i;
-  };
-  const area = (value, ph, rows, fn) => {
-    const a = document.createElement("textarea");
-    a.value = value; a.rows = rows;
-    if (ph) a.placeholder = ph;
-    a.oninput = () => { fn(a.value); wizSave(w); };
-    return a;
-  };
-  const row = (box, label, ctrl, why) => {
-    const r = el("div", "mrow");
-    if (label) r.appendChild(el("label", "", label));
-    r.appendChild(ctrl);
-    if (why) r.appendChild(el("div", "why", why));
-    box.appendChild(r);
-  };
-  const check = (box, val, label, why, fn) => {
-    const lab = el("label", "wcheck");
-    const c = document.createElement("input");
-    c.type = "checkbox"; c.checked = val;
-    c.onchange = () => { fn(c.checked); wizSave(w); render(); };
-    lab.appendChild(c);
-    lab.appendChild(document.createTextNode(" " + label));
-    const wrap = el("div", "mrow");
-    wrap.appendChild(lab);
-    if (why) wrap.appendChild(el("div", "why", why));
-    box.appendChild(wrap);
-  };
-  const chipList = (arr) => {
-    const c = el("div", "wchips");
-    arr.forEach((p, i) => {
-      const ch = el("span", "wchip", p);
-      const x = el("span", "x", "×");
-      x.onclick = () => { arr.splice(i, 1); wizSave(w); render(); };
-      ch.appendChild(x);
-      c.appendChild(ch);
-    });
-    return c;
-  };
-  const chipAdder = (ph, arr, normalize) => {
-    const wrap = el("div", "wadd");
-    const i = document.createElement("input");
-    i.type = "text"; i.placeholder = ph;
-    const push = () => {
-      let v = i.value.trim();
-      if (normalize) v = normalize(v);
-      if (v && !arr.includes(v)) { arr.push(v); wizSave(w); render(); }
-      else i.value = "";
-    };
-    i.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); push(); } };
-    const b = el("button", "small", "add");
-    b.onclick = push;
-    wrap.appendChild(i);
-    wrap.appendChild(b);
-    return wrap;
-  };
-
-  async function create() {
-    const files = [{ path: "SKILL.md", content: wizSkillMd(w) }];
-    for (const r of w.refs)
-      files.push({ path: "references/" + r, content: "# " + r.replace(/\.md$/, "") +
-        "\n\nTODO: detail that stays out of the always-loaded SKILL.md body.\n" });
-    try {
-      await api("/api/upload", { type: "skills", name: wizName(w),
-        files: files.map((f) => ({ path: f.path, content_b64: wizB64(f.content) })) });
-      wizClear();
-      close();
-      toast("created skills/" + wizName(w) +
-        (w.refs.length ? " (+" + w.refs.length + " reference stub" + (w.refs.length > 1 ? "s" : "") + ")" : ""));
-      await refresh();
-    } catch (e) { toast(e.message, true); }
-  }
-
-  function render() {
-    m.innerHTML = "";
-    const box = el("div", "mbox wizbox");
-    const head = el("h3", "", "new skill — " + WIZ_STEPS[w.step]);
-    if (hadDraft && w.step === 0) {
-      const reset = el("button", "small", "start over");
-      reset.onclick = () => { w = wizBlank(); wizClear(); render(); };
-      head.appendChild(document.createTextNode(" "));
-      head.appendChild(reset);
-    }
-    box.appendChild(head);
-    const pills = el("div", "wsteps");
-    WIZ_STEPS.forEach((s, i) => {
-      const b = el("button", "small" + (i === w.step ? " on" : ""), (i + 1) + " " + s);
-      b.onclick = () => { w.step = i; wizSave(w); render(); };
-      pills.appendChild(b);
-    });
-    box.appendChild(pills);
-
-    if (w.step === 0) {
-      box.appendChild(el("div", "mtext",
-        "A guided SKILL.md in five short steps. Everything auto-saves as a draft — Escape closes without losing work."));
-      const note = el("div", "why");
-      const syncName = () => {
-        const full = wizName(w);
-        const taken = full && wizTaken(full);
-        note.textContent = !w.name
-          ? "kebab-case — the folder name becomes the /command"
-          : taken ? full + " already exists"
-          : "creates skills/" + full + "/SKILL.md — invoked as /" + full;
-        note.classList.toggle("warnc", !!taken);
-      };
-      const ni = input(w.name, "e.g. release-checklist", (v) => {
-        w.name = v.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-        if (ni.value !== w.name) ni.value = w.name;
-        syncName();
-      });
-      const r = el("div", "mrow");
-      r.appendChild(el("label", "", "name"));
-      r.appendChild(ni);
-      r.appendChild(note);
-      box.appendChild(r);
-      syncName();
-      const gs = (DATA.types.skills || {}).groups || [];
-      if (gs.length) {
-        const sel = document.createElement("select");
-        for (const o of [{ v: "", l: "(top level)" }, ...gs.map((g) => ({ v: g, l: g + "/" }))]) {
-          const op = document.createElement("option");
-          op.value = o.v; op.textContent = o.l;
-          if (o.v === w.group) op.selected = true;
-          sel.appendChild(op);
-        }
-        sel.onchange = () => { w.group = sel.value; wizSave(w); render(); };
-        row(box, "folder", sel, "files it as " + (w.group || "<folder>") + "-" + (w.name || "<name>") + "; work/ stays out of git");
-      }
-    }
-
-    if (w.step === 1) {
-      box.appendChild(el("div", "mtext",
-        "Claude decides whether to use a skill from the description alone — the body only loads after it triggers. Spell the triggers out."));
-      row(box, "what it does",
-        area(w.what, "Reviews a PR against the team checklist and flags anything risky", 2,
-          (v) => { w.what = v; sync(); }),
-        "third person, starts with a verb — one concrete sentence");
-      row(box, "use when…",
-        area(w.when, "the user asks to review a PR, mentions the checklist, or pastes a diff", 2,
-          (v) => { w.when = v; sync(); }),
-        "the situations that should trigger it — be a little pushy; skills under-trigger more than over-trigger");
-      const pr = el("div", "mrow");
-      pr.appendChild(el("label", "", "trigger phrases"));
-      pr.appendChild(chipList(w.phrases));
-      pr.appendChild(chipAdder("things a user would actually type — Enter to add", w.phrases));
-      pr.appendChild(el("div", "why", "realistic phrasings (casual, typos and all) help Claude match real asks"));
-      box.appendChild(pr);
-      const prev = el("div", "wprev");
-      const cnt = el("div", "wcount");
-      const sync = () => {
-        const d = wizDesc(w);
-        prev.textContent = d || "— composed description appears here —";
-        cnt.textContent = d.length + " chars" +
-          (d.length > 1536 ? " — over the 1536 cap, will be truncated"
-            : d.length > 600 ? " — getting long for the always-loaded listing" : "");
-        cnt.className = "wcount" + (d.length > 1536 ? " bad" : d.length > 600 ? " warn" : "");
-      };
-      sync();
-      row(box, "description (composed)", prev);
-      box.appendChild(cnt);
-      const ex = el("details", "wex");
-      ex.open = exOpen;
-      ex.ontoggle = () => { exOpen = ex.open; };
-      ex.appendChild(el("summary", "", "examples — good and bad"));
-      ex.appendChild(el("div", "why",
-        'too vague to ever trigger: "Helps with git stuff", "Does code review things". Good descriptions name the concrete task and the situations:'));
-      for (const e of WIZ_EXAMPLES) {
-        const r = el("div", "wexrow");
-        const use = el("button", "small", "use");
-        use.onclick = () => {
-          const skipped = (w.what.trim() && w.what !== e.what)
-            || (w.when.trim() && w.when !== e.when) || w.phrases.length > 0;
-          if (!w.what.trim()) w.what = e.what;
-          if (!w.when.trim()) w.when = e.when;
-          if (!w.phrases.length) w.phrases = [...e.phrases];
-          exOpen = true;
-          wizSave(w);
-          render();
-          if (skipped) toast("kept your text — only empty fields were filled");
-        };
-        r.appendChild(use);
-        const d = el("div");
-        d.appendChild(el("b", "", e.label));
-        d.appendChild(el("div", "why",
-          '"' + e.what + '. Use when ' + e.when + '."'));
-        r.appendChild(d);
-        ex.appendChild(r);
-      }
-      box.appendChild(ex);
-    }
-
-    if (w.step === 2) {
-      box.appendChild(el("div", "mtext",
-        "The body loads when the skill triggers and stays in context — keep it lean (under ~500 lines), imperative, and explain why, not just what."));
-      const tr = el("div", "wtpl");
-      for (const [k, t] of Object.entries(WIZ_TPLS)) {
-        const b = el("button", w.tpl === k ? "on" : "");
-        b.appendChild(el("b", "", t.label));
-        b.appendChild(el("span", "tdesc", t.hint));
-        b.onclick = () => {
-          if (w.touched && w.body.trim()) { toast("body already edited — template not applied", true); return; }
-          w.tpl = k;
-          w.body = t.body(wizName(w) || "skill");
-          w.touched = false;
-          wizSave(w);
-          render();
-        };
-        tr.appendChild(b);
-      }
-      box.appendChild(tr);
-      const lc = el("div", "wcount");
-      const syncLines = () => {
-        const n = w.body.trim() ? w.body.split("\n").length : 0;
-        lc.textContent = n + " line" + (n === 1 ? "" : "s") +
-          (n > 500 ? " — over the ~500 guideline; move detail to references/"
-            : " (guideline: under ~500)");
-        lc.className = "wcount" + (n > 500 ? " warn" : "");
-      };
-      row(box, "", area(w.body, "# instructions for Claude…", 13,
-        (v) => { w.body = v; w.touched = true; syncLines(); }));
-      syncLines();
-      box.appendChild(lc);
-      const snips = el("div", "wsnips");
-      snips.appendChild(el("span", "why", "insert section:"));
-      for (const [k, s] of Object.entries(WIZ_SNIPPETS)) {
-        const b = el("button", "small", "+ " + k);
-        b.onclick = () => {
-          w.body = w.body.trim() ? w.body.replace(/\s+$/, "") + "\n\n" + s : s;
-          w.touched = true;
-          wizSave(w);
-          render();
-        };
-        snips.appendChild(b);
-      }
-      box.appendChild(snips);
-    }
-
-    if (w.step === 3) {
-      box.appendChild(el("div", "mtext",
-        "All optional — skip straight to review if none of this applies."));
-      const rr = el("div", "mrow");
-      rr.appendChild(el("label", "", "reference files"));
-      rr.appendChild(chipList(w.refs));
-      rr.appendChild(chipAdder("e.g. api-details.md — Enter to add", w.refs,
-        (v) => v && (v.endsWith(".md") ? v : v + ".md")));
-      const ideas = WIZ_REF_IDEAS.filter((i) => !w.refs.includes(i));
-      if (ideas.length) {
-        const ir = el("div", "wsnips");
-        ir.appendChild(el("span", "why", "common ones:"));
-        for (const i of ideas) {
-          const b = el("button", "small", "+ " + i);
-          b.onclick = () => { w.refs.push(i); wizSave(w); render(); };
-          ir.appendChild(b);
-        }
-        rr.appendChild(ir);
-      }
-      rr.appendChild(el("div", "why",
-        "stubs created under references/ — loaded only when needed, so bulky detail here costs nothing per session"));
-      box.appendChild(rr);
-      check(box, w.manual, "manual-only (disable-model-invocation)",
-        "Claude never auto-invokes it — for workflows where you control the timing (deploy, send, commit)",
-        (v) => { w.manual = v; });
-      check(box, w.hidden, "hide from / menu (user-invocable: false)",
-        "only Claude can invoke it — for background knowledge that isn't a command",
-        (v) => { w.hidden = v; });
-      row(box, "allowed-tools",
-        input(w.tools, "Read Grep Bash(git add *)", (v) => { w.tools = v.trim(); }),
-        "pre-approves tools for the skill's turn — no permission prompts");
-      const tp = el("div", "wsnips");
-      tp.appendChild(el("span", "why", "presets:"));
-      for (const [label, preset] of WIZ_TOOL_PRESETS) {
-        const b = el("button", "small", "+ " + label);
-        b.onclick = () => {
-          if (!w.tools.includes(preset))
-            w.tools = (w.tools ? w.tools + " " : "") + preset;
-          wizSave(w);
-          render();
-        };
-        tp.appendChild(b);
-      }
-      box.appendChild(tp);
-      row(box, "argument-hint",
-        input(w.arghint, "[issue-number]", (v) => { w.arghint = v.trim(); }),
-        "shown in the / autocomplete next to the command");
-      const ap = el("div", "wsnips");
-      ap.appendChild(el("span", "why", "e.g.:"));
-      for (const i of WIZ_ARG_IDEAS) {
-        const b = el("button", "small", i);
-        b.onclick = () => { w.arghint = i; wizSave(w); render(); };
-        ap.appendChild(b);
-      }
-      box.appendChild(ap);
-    }
-
-    if (w.step === 4) {
-      const lint = wizLint(w);
-      const bad = lint.some((l) => l.level === "bad");
-      const ll = el("div", "wlint");
-      for (const l of lint) {
-        const r = el("div", "wlintrow " + l.level,
-          (l.level === "ok" ? "✓ " : l.level === "warn" ? "⚠ " : "✗ ") + l.msg);
-        ll.appendChild(r);
-      }
-      box.appendChild(ll);
-      const files = ["skills/" + (wizName(w) || "?") + "/SKILL.md",
-        ...w.refs.map((r) => "skills/" + (wizName(w) || "?") + "/references/" + r)];
-      const fr = el("div", "wfiles");
-      fr.appendChild(el("div", "why", "creates: " + files.join(", ")));
-      const cp = el("button", "small", "copy SKILL.md");
-      cp.onclick = async () => {
-        try {
-          await navigator.clipboard.writeText(wizSkillMd(w));
-          toast("SKILL.md copied");
-        } catch (e) { toast("copy failed: " + e.message, true); }
-      };
-      fr.appendChild(cp);
-      box.appendChild(fr);
-      const prev = el("pre", "wprev");
-      prev.textContent = wizSkillMd(w);
-      box.appendChild(prev);
-      const doc = el("a", "why", "full frontmatter reference → code.claude.com/docs/en/skills");
-      doc.href = "https://code.claude.com/docs/en/skills";
-      doc.target = "_blank";
-      box.appendChild(doc);
-      var createBtn = el("button", "primary", "create skill");
-      createBtn.disabled = bad;
-      createBtn.title = bad ? "fix the ✗ items first" : "";
-      createBtn.onclick = create;
-    }
-
-    const nav = el("div", "wnav");
-    if (w.step === 0) {
-      const quick = el("button", "small", "plain stub instead");
-      quick.onclick = () => { wizSave(w); close(); quickNewSkill(); };
-      nav.appendChild(quick);
-    }
-    nav.appendChild(el("span", "spring"));
-    const cancel = el("button", "", "close");
-    cancel.onclick = () => { wizSave(w); close(); };
-    nav.appendChild(cancel);
-    if (w.step > 0) {
-      const back = el("button", "", "back");
-      back.onclick = () => { w.step--; wizSave(w); render(); };
-      nav.appendChild(back);
-    }
-    if (w.step < WIZ_STEPS.length - 1) {
-      const next = el("button", "primary", "next");
-      next.onclick = () => { w.step++; wizSave(w); render(); };
-      nav.appendChild(next);
-    } else {
-      nav.appendChild(createBtn);
-    }
-    box.appendChild(nav);
-    m.appendChild(box);
-    const first = box.querySelector("input[type=text], textarea");
-    if (first) first.focus();
-  }
-
-  render();
-}
-
-async function quickNewSkill() {
-  const r = await modal({ title: "new skill",
-    text: "kebab-case; a '<group>-' prefix files it in that group; 'work-' stays out of git",
-    fields: [{ id: "n", label: "name" }], ok: "create" });
-  if (!r || !r.n) return;
-  try {
-    const res = await api("/api/new", { type: "skills", name: r.n });
-    toast("created " + res.path);
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function newItem() {
-  if (TAB === "skills") return skillWizard();
-  const r = await modal({ title: "new " + TAB.replace(/s$/, ""),
-    text: "use folder/name for nesting; work/ stays out of git",
-    fields: [{ id: "n", label: "name" }], ok: "create" });
-  if (!r || !r.n) return;
-  try {
-    const res = await api("/api/new", { type: TAB, name: r.n });
-    toast("created " + res.path);
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function encodeFiles(files, stripRoot) {
-  const payload = [];
-  for (const f of files) {
-    const rel = stripRoot
-      ? f.webkitRelativePath.split("/").slice(1).join("/")
-      : f.name;
-    if (!rel) continue;
-    const buf = new Uint8Array(await f.arrayBuffer());
-    let bin = "";
-    for (const b of buf) bin += String.fromCharCode(b);
-    payload.push({ path: rel, content_b64: btoa(bin) });
-  }
-  return payload;
-}
-
-const COLLECTION_MARKS = ["skills/", "commands/", "agents/"];
-const CONFIG_FILE_NAMES = ["CLAUDE.md", "settings.json", "keybindings.json"];
-
-async function uploadItems(ev) {
-  const files = [...ev.target.files].filter(
-    (f) => !/(^|\/)(\.git|node_modules)(\/|$)|(^|\/)\.DS_Store$/.test(f.webkitRelativePath)
-  );
-  ev.target.value = "";
-  if (!files.length) return;
-  const root = files[0].webkitRelativePath.split("/")[0];
-  const rels = files.map((f) => f.webkitRelativePath.split("/").slice(1).join("/"));
-  const isCollection = rels.some((r) =>
-    COLLECTION_MARKS.some((m) => r.startsWith(m)) || CONFIG_FILE_NAMES.includes(r));
-  if (isCollection) {
-    const m = await modal({ title: "import collection",
-      text: "this folder looks like a whole Claude config — 'work' stays out of git",
-      fields: [{ id: "n", label: "import as", value: root }], ok: "import" });
-    if (!m || !m.n) return;
-    try {
-      const payload = await encodeFiles(files, true);
-      const r = await api("/api/upload-collection", { name: m.n, files: payload });
-      toast("imported collection " + r.path + "/ — " +
-        r.skills + " skills, " + r.commands + " commands, " + r.agents + " agents" +
-        (r.config_files.length ? ", files: " + r.config_files.join(", ") : ""));
-      await refresh();
-    } catch (e) { toast(e.message, true); }
-    return;
-  }
-  const m = await modal({ title: "import " + TAB,
-    text: TAB === "skills" ? "a folder of skills becomes a group" : undefined,
-    fields: [{ id: "n",
-      label: TAB === "skills" ? "import as" : "into folder (blank = top level)",
-      value: TAB === "skills" ? root : "" }], ok: "import" });
-  if (m === null) return;
-  try {
-    const payload = await encodeFiles(files, true);
-    const r = await api("/api/upload", { type: TAB, name: m.n, files: payload });
-    toast(r.kind === "group"
-      ? "imported " + r.path + "/ as a group — " + r.skills + " skill" + (r.skills === 1 ? "" : "s") + " linked"
-      : "imported " + (r.path || TAB) + " (" + r.files + " files)");
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function uploadFiles(ev) {
-  const files = [...ev.target.files];
-  ev.target.value = "";
-  if (!files.length) return;
-  const m = await modal({ title: "add files",
-    text: TAB === "skills"
-      ? "an existing skill name, or a new one (a lone .md becomes its SKILL.md)"
-      : undefined,
-    fields: [{ id: "n",
-      label: TAB === "skills" ? "into skill" : "into folder (blank = top level)" }],
-    ok: "add" });
-  if (m === null) return;
-  try {
-    const payload = await encodeFiles(files, false);
-    const ep = TAB === "skills" ? "/api/upload-files" : "/api/upload";
-    const r = await api(ep, { type: TAB, name: m.n, files: payload });
-    toast(r.created
-      ? "created " + r.path + " (" + r.files + " files)"
-      : "added " + r.files + " file" + (r.files === 1 ? "" : "s") + " to " + (r.path || TAB));
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
-
-document.getElementById("up").addEventListener("change", uploadItems);
-document.getElementById("upf").addEventListener("change", uploadFiles);
-document.getElementById("q").addEventListener("input", render);
 document.getElementById("themebtn").addEventListener("click", toggleTheme);
-document.getElementById("sortsel").addEventListener("change", (e) => {
-  SORT = e.target.value;
-  render();
-});
 
-// Keyboard: Ctrl/Cmd+K palette, "/" focuses the filter, Escape closes
-// editor/menu, 1-9 switch tabs.
+// Keyboard: Ctrl/Cmd+K palette, Escape closes editor/menu, 1-9 switch tabs.
 document.addEventListener("keydown", (e) => {
   if (!document.getElementById("modal").hidden) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -3126,11 +1770,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") e.target.blur();
     return;
   }
-  if (e.key === "/") {
-    if (EDITING || EXTRA_TABS.includes(TAB)) return;
-    e.preventDefault();
-    document.getElementById("q").focus();
-  } else if (e.key === "Escape") {
+  if (e.key === "Escape") {
     closeMenu();
     if (EDITING) closeEditor();
   } else if (e.key >= "1" && e.key <= "9" && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -3138,28 +1778,5 @@ document.addEventListener("keydown", (e) => {
     if (t) { TAB = t; location.hash = t; render(); }
   }
 });
-
-// Live reload: poll a cheap server-side fingerprint; refresh when files change
-// externally (another editor, a running Claude session). Paused while typing,
-// editing, or any overlay is open.
-let FP = null;
-setInterval(async () => {
-  if (document.hidden || EDITING || PAL) return;
-  if (!document.getElementById("modal").hidden) return;
-  if (document.getElementById("menu")) return;
-  const ae = document.activeElement;
-  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
-  try {
-    const r = await fetch("/api/fingerprint");
-    if (!r.ok) return;
-    const j = await r.json();
-    if (FP !== null && j.fp !== FP) {
-      FP = j.fp;
-      await refresh();
-    } else {
-      FP = j.fp;
-    }
-  } catch (e) { /* server briefly unavailable — retry next tick */ }
-}, 4000);
 
 refresh();

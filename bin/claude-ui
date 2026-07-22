@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
-"""Local web UI for managing Claude Code config in this repo.
+"""Local dashboard + editor for the user's live Claude Code config.
 
 Usage:  bin/claude-ui [--port 7333]
 
-Manages every user-level Claude Code config type from one page:
+Shows everything actually on this machine and edits it in place — it never
+owns, links, tracks, or syncs anything:
 
-  skills/            dirs with SKILL.md; nested "groups" get auto-managed
-                     top-level <group>-<name> symlinks (Claude Code only
-                     discovers direct children of the skills dir)
-  commands/          slash commands: .md files; subdirs namespace natively
-                     (commands/git/pr.md -> /git:pr)
-  agents/            custom subagents: .md files
-  claude/            CLAUDE.md, settings.json, keybindings.json
+  <config>/skills/            dirs with SKILL.md
+  <config>/commands/          slash commands: .md files (subdirs namespace)
+  <config>/agents/            custom subagents: .md files
+  <config>/output-styles/     output styles: .md files
+  <config>/CLAUDE.md, settings.json, keybindings.json
+  ~/.claude.json              user-scope MCP servers
 
-Collections: any other top-level dir shaped like a Claude config
-(containing skills/, commands/, agents/, CLAUDE.md, ...) — e.g. work/ —
-is bridged in automatically: its skills get top-level <collection>-<name>
-links, its commands/agents get a <type>/<collection> dir symlink (native
-namespacing), and its config files become selectable sources in the links
-panel. The work/ collection is gitignored; upload as many others as you
-like via the folder picker.
+Enable/disable is the only stateful action: disabled things move to
+<config>/disabled/ (a plain visible dir outside everything Claude Code
+scans) and back. The filesystem is the entire state — no manifest.
 
-A links panel shows how each mapping lands in the Claude config dir
-(default ~/.claude, or $CLAUDE_CONFIG_DIR, overridable in the UI and
-persisted to the gitignored .claude-ui.json). Linking backs up a real
-target first; if the repo side doesn't exist yet, linking "adopts" the
-real target by moving it into the repo and symlinking back. Stdlib only.
+The config dir defaults to ~/.claude, honors $CLAUDE_CONFIG_DIR, and can
+be overridden in the UI (persisted to the gitignored .claude-ui.json,
+which holds nothing else). Stdlib only.
 """
 
 import sys
