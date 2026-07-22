@@ -1,0 +1,3 @@
+# fish writes universal-variable state into its config dir at runtime;
+# with the dir symlinked into the repo, keep that machine-local.
+fish_variables
