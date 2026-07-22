@@ -105,8 +105,17 @@ keys. No record of application is kept; "installed?" is answered by looking
 (does the drop-in exist, is the key set), and removal is deleting the
 drop-in / clearing the key, offered as an action per piece.
 
-Initial pieces: **statusline** (self-contained via `statusline.py`),
-**fish**, **tmux**, **ghostty**.
+Implemented piece: **statusline** (self-contained via `statusline.py`) —
+apply generates the script and sets the one `settings.json` key; remove
+deletes the script and clears the key. The `setup.py` registry is the
+extension point for further pieces.
+
+The originally-envisioned **fish/tmux/ghostty** pieces are **parked** (decided
+2026-07-22): on this machine `~/.config/fish` is a symlink into the repo (fish
+is already versioned, so a copy-based piece fights the symlink), while tmux and
+ghostty are machine-local with no repo payload. A dotfile piece would mean
+authoring new snippets for a need that isn't concrete yet. The framework makes
+adding one later a single registry entry once a real payload and need appear.
 
 ## Enable / disable
 
