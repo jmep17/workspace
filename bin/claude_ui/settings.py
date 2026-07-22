@@ -9,19 +9,37 @@ from .core import CONFIG_FILES, atomic_write, config_dir, tilde
 
 
 # User-scope settings.json keys, from https://code.claude.com/docs/en/settings
-# (types: bool, string, number, enum, list, kv, json)
+# and .scratch/claude-code-config-research/ (docs snapshot 2026-07-22).
+#
+# Control types the frontend understands:
+#   bool             true/false dropdown (three-state with unset)
+#   number           numeric input
+#   string           free text input
+#   enum             fixed-choice dropdown; requires "values"
+#   combo            free text with suggested "values" (datalist); freeform still allowed
+#   list             one-value-per-row editor; optional "item_values" suggestions per row
+#   kv               key/value row editor. Optional "value_type": "number" for numeric
+#                    values, or "values" to make each value a dropdown.
+#   object           declared-field mini form; requires "fields":
+#                    [{"key", "type", "values"?, "desc"?, "const"?}]. A field with
+#                    "const" is always written and gets no input (e.g. type: "command").
+#   json             raw-JSON textarea, for deeply nested / rarely-edited configs.
+MODEL_ALIASES = ["default", "best", "fable", "sonnet", "opus", "haiku",
+                 "sonnet[1m]", "opus[1m]", "opusplan", "opusplan[1m]"]
+LANGS = ["en", "ja", "fr", "es", "de", "zh", "ko", "pt", "it", "ru"]
+
 SETTINGS_SCHEMA = [
-    {"key": "model", "type": "string", "cat": "model",
-     "desc": "Model for the main session — alias (opus, sonnet, haiku) or full model ID; read at startup"},
-    {"key": "fallbackModel", "type": "list", "cat": "model",
-     "desc": "Fallback model chain, max 3 models"},
+    {"key": "model", "type": "combo", "values": MODEL_ALIASES, "cat": "model",
+     "desc": "Model for the main session — alias (opus, sonnet, haiku…) or full model ID; read at startup"},
+    {"key": "fallbackModel", "type": "list", "item_values": MODEL_ALIASES, "cat": "model",
+     "desc": "Fallback model chain tried in order on overload, max 3 models"},
     {"key": "effortLevel", "type": "enum", "values": ["low", "medium", "high", "xhigh"], "cat": "model",
      "desc": "Persist reasoning effort level across sessions"},
     {"key": "alwaysThinkingEnabled", "type": "bool", "cat": "model",
      "desc": "Enable extended thinking by default"},
     {"key": "thinkingBudgetTokens", "type": "number", "cat": "model",
      "desc": "Token budget for extended thinking when always-thinking is on"},
-    {"key": "advisorModel", "type": "string", "cat": "model",
+    {"key": "advisorModel", "type": "combo", "values": ["opus", "sonnet", "haiku"], "cat": "model",
      "desc": "Model for the server-side advisor tool; unset to disable"},
     {"key": "fastMode", "type": "bool", "cat": "model",
      "desc": "Enable fast mode for sessions where available"},
@@ -29,8 +47,8 @@ SETTINGS_SCHEMA = [
      "desc": "Require per-session opt-in for fast mode"},
 
     {"key": "permissions.defaultMode", "type": "enum", "cat": "permissions",
-     "values": ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"],
-     "desc": "Default permission mode: prompt on first use / auto-accept edits / read-only plan / auto with safety checks / deny unless pre-approved / skip prompts"},
+     "values": ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "manual"],
+     "desc": "Startup permission mode: prompt on first use / auto-accept edits / read-only plan / auto with safety checks / deny unless pre-approved / skip prompts / manual (alias of default)"},
     {"key": "permissions.allow", "type": "list", "cat": "permissions",
      "desc": "Rules to auto-approve, e.g. Bash(npm run test *)"},
     {"key": "permissions.ask", "type": "list", "cat": "permissions",
@@ -45,20 +63,37 @@ SETTINGS_SCHEMA = [
     {"key": "env", "type": "kv", "cat": "environment & hooks",
      "desc": "Environment variables applied to every session and subprocess"},
     {"key": "hooks", "type": "json", "cat": "environment & hooks",
-     "desc": "Lifecycle hooks (SessionStart, PreToolUse, PostToolUse, Stop, ...) — see docs/en/hooks"},
+     "desc": "Lifecycle hooks — use the hooks builder above; edit here only for non-standard shapes"},
     {"key": "disableAllHooks", "type": "bool", "cat": "environment & hooks",
      "desc": "Disable all hooks and custom status line"},
-    {"key": "statusLine", "type": "json", "cat": "environment & hooks",
-     "desc": "Custom status line, e.g. {\"type\": \"command\", \"command\": \"~/bin/statusline\"}"},
+    {"key": "statusLine", "type": "object", "cat": "environment & hooks",
+     "desc": "Custom status line: a command whose first stdout line is the status line",
+     "fields": [
+         {"key": "type", "const": "command"},
+         {"key": "command", "type": "string", "desc": "command run each refresh, e.g. ~/.claude/statusline.sh"},
+         {"key": "padding", "type": "number", "desc": "leading spaces (0 hugs the edge)"},
+         {"key": "refreshInterval", "type": "number", "desc": "refresh interval in ms"},
+         {"key": "hideVimModeIndicator", "type": "bool", "desc": "hide the vim mode indicator"},
+     ]},
 
     {"key": "editorMode", "type": "enum", "values": ["normal", "vim"], "default": "normal", "cat": "interface",
      "desc": "Key binding mode for the input prompt"},
-    {"key": "tui", "type": "enum", "values": ["classic", "fullscreen", "auto"], "cat": "interface",
+    {"key": "tui", "type": "enum", "values": ["default", "fullscreen"], "cat": "interface",
      "desc": "TUI renderer mode"},
-    {"key": "interfaceLanguage", "type": "string", "cat": "interface",
+    {"key": "theme", "type": "combo", "cat": "interface",
+     "values": ["auto", "dark", "light", "dark-daltonized", "light-daltonized", "dark-ansi", "light-ansi"],
+     "desc": "Color theme (or custom:<slug> for a themes/ file)"},
+    {"key": "interfaceLanguage", "type": "combo", "values": LANGS, "cat": "interface",
      "desc": "Interface language, e.g. en, ja, fr"},
-    {"key": "outputStyle", "type": "string", "cat": "interface",
-     "desc": "Output rendering style (read at startup)"},
+    {"key": "language", "type": "combo", "values": LANGS, "cat": "interface",
+     "desc": "Preferred language for Claude's responses"},
+    {"key": "outputStyle", "type": "combo", "values": ["default", "Explanatory", "Learning"], "cat": "interface",
+     "desc": "Output rendering style (read at startup); your installed styles are suggested"},
+    {"key": "preferredNotifChannel", "type": "enum", "cat": "interface", "default": "auto",
+     "values": ["auto", "terminal_bell", "iterm2", "iterm2_with_bell", "kitty", "ghostty", "notifications_disabled"],
+     "desc": "How desktop notifications are delivered"},
+    {"key": "viewMode", "type": "enum", "values": ["default", "verbose", "focus"], "cat": "interface",
+     "desc": "Startup transcript view mode"},
     {"key": "spinnerTipsEnabled", "type": "bool", "default": True, "cat": "interface",
      "desc": "Show tips while waiting for the model"},
     {"key": "autoScrollEnabled", "type": "bool", "default": True, "cat": "interface",
@@ -78,13 +113,19 @@ SETTINGS_SCHEMA = [
      "desc": "Show hidden files in file operations"},
     {"key": "keyBindings", "type": "json", "cat": "interface",
      "desc": "Custom keybindings for the input prompt"},
-    {"key": "fileSuggestion", "type": "json", "cat": "interface",
-     "desc": "Custom script for @-file autocomplete: {\"type\": \"command\", \"command\": \"...\"}"},
+    {"key": "fileSuggestion", "type": "object", "cat": "interface",
+     "desc": "Custom script for @-file autocomplete",
+     "fields": [
+         {"key": "type", "const": "command"},
+         {"key": "command", "type": "string", "desc": "command that emits candidate paths"},
+     ]},
 
     {"key": "attribution.commit", "type": "string", "cat": "git",
-     "desc": "Custom commit attribution string"},
+     "desc": "Custom commit attribution string (empty string hides it)"},
     {"key": "attribution.pr", "type": "string", "cat": "git",
-     "desc": "Custom PR attribution string"},
+     "desc": "Custom PR attribution string (empty string hides it)"},
+    {"key": "attribution.sessionUrl", "type": "bool", "default": True, "cat": "git",
+     "desc": "Append a Claude-Session trailer from web/Remote Control sessions"},
     {"key": "gitAttributionName", "type": "string", "cat": "git",
      "desc": "Name for commits/PRs when different from git config"},
     {"key": "gitAttributionEmail", "type": "string", "cat": "git",
@@ -113,12 +154,13 @@ SETTINGS_SCHEMA = [
      "desc": "Specific .mcp.json servers to approve"},
     {"key": "disabledMcpjsonServers", "type": "list", "cat": "mcp & plugins",
      "desc": "Specific .mcp.json servers to reject"},
-    {"key": "mcpServerTimeouts", "type": "json", "cat": "mcp & plugins",
-     "desc": "Per-server timeouts in seconds, e.g. {\"github\": 30}"},
+    {"key": "mcpServerTimeouts", "type": "kv", "value_type": "number", "cat": "mcp & plugins",
+     "desc": "Per-server startup timeout in seconds, e.g. github → 30"},
     {"key": "pluginMarketplaces", "type": "list", "cat": "mcp & plugins",
      "desc": "Custom plugin marketplace sources"},
-    {"key": "skillOverrides", "type": "json", "cat": "mcp & plugins",
-     "desc": "Per-skill visibility: {\"skill-name\": \"on|name-only|user-invocable-only|off\"}"},
+    {"key": "skillOverrides", "type": "kv", "cat": "mcp & plugins",
+     "values": ["on", "name-only", "user-invocable-only", "off"],
+     "desc": "Per-skill visibility override (skill name → visibility)"},
     {"key": "disableBundledSkills", "type": "bool", "cat": "mcp & plugins",
      "desc": "Disable bundled skills and workflows"},
     {"key": "disableClaudeAiConnectors", "type": "bool", "cat": "mcp & plugins",
@@ -148,6 +190,9 @@ SETTINGS_SCHEMA = [
      "desc": "Release channel for auto-updates"},
     {"key": "defaultShell", "type": "enum", "values": ["bash", "powershell"], "cat": "system",
      "desc": "Shell for input-box ! commands"},
+    {"key": "teammateMode", "type": "enum", "values": ["in-process", "auto", "tmux", "iterm2"],
+     "default": "in-process", "cat": "system",
+     "desc": "How agent-team members are displayed"},
     {"key": "restartOnConfigChange", "type": "bool", "cat": "system",
      "desc": "Restart session when config files change"},
     {"key": "telemetryEnabled", "type": "bool", "cat": "system",
@@ -178,8 +223,10 @@ SETTINGS_SCHEMA = [
      "desc": "Disable dynamic workflows and bundled workflow commands"},
     {"key": "agentPushNotifEnabled", "type": "bool", "default": False, "cat": "system",
      "desc": "Proactive push notifications when Remote Control is connected"},
-    {"key": "autoUpdatesChannel", "type": "enum", "values": ["latest", "stable"], "default": "latest",
-     "cat": "system", "desc": "Release channel for auto-updates"},
+    {"key": "worktree.baseRef", "type": "enum", "values": ["fresh", "head"], "cat": "system",
+     "desc": "Base ref for new worktrees: clean tree or current HEAD"},
+    {"key": "worktree.bgIsolation", "type": "enum", "values": ["worktree", "none"], "cat": "system",
+     "desc": "Isolate background agents in their own worktree"},
 ]
 
 # dedupe (keep first occurrence)

@@ -116,15 +116,29 @@
   .srow .sdesc { color: var(--fg2); font-size: .75rem; }
   .srow .sctrl { display: flex; gap: .4rem; align-items: flex-start;
     width: 26rem; max-width: 100%; flex-wrap: wrap; justify-content: flex-end; }
+  .srow .sctrl.wide { width: 100%; justify-content: flex-start; }
   @media (max-width: 720px) {
     .srow .sctrl { width: 100%; justify-content: flex-start; }
     .lrow .lname { min-width: 0; }
   }
-  .srow .sctrl input[type=text] { flex: 1; min-width: 10rem; padding: .3rem .5rem; font-size: .78rem; }
+  .srow .sctrl input[type=text], .srow .sctrl input[type=number] {
+    flex: 1; min-width: 8rem; padding: .3rem .5rem; font-size: .78rem;
+    background: var(--bg1); border: 1px solid var(--bg2); color: var(--fg);
+    border-radius: 6px; font-family: inherit; }
+  .srow .sctrl input:focus, .srow .sctrl select:focus { outline: none; border-color: var(--blue); }
   .srow .sctrl textarea { flex: 1; min-width: 14rem; background: var(--bg1);
     border: 1px solid var(--bg2); color: var(--fg); border-radius: 6px;
     font: inherit; font-size: .75rem; padding: .4rem .5rem; }
   .srow .sctrl textarea:focus { outline: none; border-color: var(--blue); }
+  /* row editors (list / kv) and object mini-forms */
+  .srow .sctrl .formrows, .srow .sctrl .formobj {
+    width: 100%; display: flex; flex-direction: column; gap: .35rem; margin-bottom: .1rem; }
+  .srow .sctrl .formrow { display: flex; gap: .4rem; align-items: center; width: 100%; }
+  .srow .sctrl .formrow input.kk { flex: 0 1 11rem; min-width: 6rem; }
+  .srow .sctrl .formrow select { flex: 1; min-width: 8rem; }
+  .srow .sctrl .formfield { display: flex; flex-direction: column; gap: .2rem; width: 100%; }
+  .srow .sctrl .formfield .flabel { font-size: .7rem; color: var(--fg2); }
+  .srow .sctrl .formfield select { align-self: flex-start; min-width: 8rem; }
   .sethead { color: var(--fg2); font-size: .8rem; margin-bottom: .75rem; }
   .fedit { width: 100%; background: var(--bg1); border: 1px solid var(--bg2);
     color: var(--fg); border-radius: 6px; font: inherit; font-size: .78rem;

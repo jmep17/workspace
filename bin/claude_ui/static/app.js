@@ -241,43 +241,261 @@ function settingsGet(key) {
   return node;
 }
 
+// ---- schema-driven form controls ------------------------------------------
+// Every settings control resolves to a `collect()` that returns the value to
+// write, `undefined` to clear the key, or throws on invalid input. Selects
+// (bool/enum) commit on change; everything else commits on the "set" button.
+
+async function commitSetting(key, value) {
+  try {
+    await api("/api/settings-set", { key, value });
+    toast(value === null ? key + " cleared" : key + " set");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+const clearSetting = (key) => commitSetting(key, null);
+
+function trySet(key, collect) {
+  let v;
+  try { v = collect(); }
+  catch (e) { toast("invalid value: " + e.message, true); return; }
+  if (v === undefined) clearSetting(key);
+  else commitSetting(key, v);
+}
+
+const opt = (v, label) => {
+  const o = document.createElement("option");
+  o.value = v; o.textContent = label == null ? v : label;
+  return o;
+};
+const mkbtn = (cls, label, onclick) => {
+  const b = document.createElement("button");
+  b.className = cls; b.textContent = label; b.onclick = onclick;
+  return b;
+};
+
+let DL_SEQ = 0;
+function datalist(values) {
+  const dl = document.createElement("datalist");
+  dl.id = "dl_" + (++DL_SEQ);
+  for (const v of values) dl.appendChild(opt(v));
+  return dl;
+}
+
+// combo suggestions, augmented with live data for a couple of keys
+function comboSuggest(s) {
+  const base = (s.values || []).slice();
+  if (s.key === "outputStyle")
+    for (const it of ((DATA.items || {})["output-styles"] || []))
+      if (it.name && !base.includes(it.name)) base.push(it.name);
+  return base;
+}
+
+// A single scalar control (used standalone and inside object/map forms).
+// Returns { node, aux?, collect } — aux is an optional <datalist> to append.
+function scalarControl(f, value, ph) {
+  if (f.type === "bool") {
+    const sel = document.createElement("select");
+    sel.append(opt("", "(unset" + (f.default !== undefined ? ", default: " + f.default : "") + ")"),
+      opt("true"), opt("false"));
+    if (value === true) sel.value = "true";
+    else if (value === false) sel.value = "false";
+    return { node: sel, collect: () => sel.value === "" ? undefined : sel.value === "true" };
+  }
+  if (f.type === "enum") {
+    const sel = document.createElement("select");
+    sel.appendChild(opt("", "(unset" + (f.default !== undefined ? ", default: " + f.default : "") + ")"));
+    for (const v of f.values) sel.appendChild(opt(String(v)));
+    // keep an out-of-vocabulary current value visible instead of showing "(unset)"
+    if (value !== undefined && value !== null && !f.values.map(String).includes(String(value)))
+      sel.appendChild(opt(String(value), String(value) + " (current)"));
+    if (value !== undefined && value !== null) sel.value = String(value);
+    return { node: sel, collect: () => sel.value === "" ? undefined : sel.value };
+  }
+  const inp = document.createElement("input");
+  inp.type = f.type === "number" ? "number" : "text";
+  if (value !== undefined && value !== null) inp.value = String(value);
+  if (ph) inp.placeholder = ph;
+  let aux = null;
+  const sugg = f.type === "combo" ? comboSuggest(f) : [];
+  if (sugg.length) { aux = datalist(sugg); inp.setAttribute("list", aux.id); }
+  const collect = () => {
+    const r = inp.value.trim();
+    if (!r) return undefined;
+    if (f.type === "number") {
+      const n = Number(r);
+      if (Number.isNaN(n)) throw new Error((f.key || "value") + ": not a number");
+      return n;
+    }
+    return r;
+  };
+  return { node: inp, aux, collect };
+}
+
+// list → one input per entry, with add/remove; optional per-row suggestions.
+function listForm(ctrl, s, cur) {
+  const box = document.createElement("div");
+  box.className = "formrows";
+  ctrl.appendChild(box);
+  const dl = (s.item_values || []).length ? datalist(s.item_values) : null;
+  if (dl) ctrl.appendChild(dl);
+  const addRow = (val) => {
+    const r = document.createElement("div");
+    r.className = "formrow";
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.value = val || "";
+    if (dl) inp.setAttribute("list", dl.id);
+    r.append(inp, mkbtn("small danger", "×", () => r.remove()));
+    box.appendChild(r);
+  };
+  (Array.isArray(cur) ? cur : []).forEach((v) => addRow(String(v)));
+  ctrl.appendChild(mkbtn("small", "+ add", () => addRow("")));
+  return () => {
+    const vals = [...box.querySelectorAll("input")]
+      .map((i) => i.value.trim()).filter(Boolean);
+    return vals.length ? vals : undefined;
+  };
+}
+
+// kv → key/value row editor; value control is a dropdown (s.values),
+// number input (s.value_type === "number"), or free text.
+function mapForm(ctrl, s, cur) {
+  const box = document.createElement("div");
+  box.className = "formrows";
+  ctrl.appendChild(box);
+  const addRow = (k, v) => {
+    const r = document.createElement("div");
+    r.className = "formrow";
+    const kin = document.createElement("input");
+    kin.type = "text"; kin.className = "kk"; kin.placeholder = "key";
+    kin.value = k || "";
+    const val = scalarControl(
+      s.values ? { type: "enum", values: s.values }
+        : s.value_type === "number" ? { type: "number" } : { type: "string" },
+      v, "value");
+    r.append(kin, val.node);
+    if (val.aux) r.appendChild(val.aux);
+    r.append(mkbtn("small danger", "×", () => r.remove()));
+    box.appendChild(r);
+    return () => {
+      const key = kin.value.trim();
+      let out;
+      try { out = val.collect(); } catch (e) { throw new Error(key + ": " + e.message); }
+      if (!key && out === undefined) return null;
+      if (!key) throw new Error("missing key for value: " + out);
+      if (out === undefined) throw new Error(key + ": missing value");
+      return [key, out];
+    };
+  };
+  const collectors = [];
+  const entries = cur && typeof cur === "object" && !Array.isArray(cur)
+    ? Object.entries(cur) : [];
+  entries.forEach(([k, v]) => collectors.push(addRow(k, v)));
+  ctrl.appendChild(mkbtn("small", "+ add", () => collectors.push(addRow("", ""))));
+  return () => {
+    const out = {};
+    for (const c of collectors) {
+      const pair = c();
+      if (pair) out[pair[0]] = pair[1];
+    }
+    return Object.keys(out).length ? out : undefined;
+  };
+}
+
+// object → labeled mini-form over declared fields; const fields are always written.
+function objectForm(ctrl, s, cur) {
+  const box = document.createElement("div");
+  box.className = "formobj";
+  ctrl.appendChild(box);
+  const obj = cur && typeof cur === "object" && !Array.isArray(cur) ? cur : {};
+  const collectors = [];
+  for (const f of s.fields) {
+    if (f.const !== undefined) continue;
+    const line = document.createElement("label");
+    line.className = "formfield";
+    const lab = document.createElement("span");
+    lab.className = "flabel";
+    lab.textContent = f.key + (f.desc ? " — " + f.desc : "");
+    line.appendChild(lab);
+    const sc = scalarControl(f, obj[f.key]);
+    line.appendChild(sc.node);
+    if (sc.aux) line.appendChild(sc.aux);
+    box.appendChild(line);
+    collectors.push([f.key, sc.collect]);
+  }
+  return () => {
+    const out = {};
+    let any = false;
+    for (const [k, collect] of collectors) {
+      const v = collect();
+      if (v !== undefined) { out[k] = v; any = true; }
+    }
+    if (!any) return undefined;
+    for (const f of s.fields) if (f.const !== undefined) out[f.key] = f.const;
+    return out;
+  };
+}
+
+function jsonForm(ctrl, s, cur, isSet) {
+  const ta = document.createElement("textarea");
+  ta.placeholder = "JSON";
+  const text = isSet ? JSON.stringify(cur, null, 2) : "";
+  ta.value = text;
+  ta.rows = Math.min(12, Math.max(2, text.split("\n").length));
+  ctrl.appendChild(ta);
+  return () => {
+    const r = ta.value.trim();
+    if (!r) return undefined;
+    try { return JSON.parse(r); }
+    catch (e) { throw new Error("JSON: " + e.message); }
+  };
+}
+
 function settingRow(s) {
   const cur = settingsGet(s.key);
   const isSet = cur !== undefined;
   const row = document.createElement("div");
   row.className = "srow";
-  const id = "set_" + s.key.replace(/[^a-zA-Z0-9]/g, "_");
-  let ctrl = "";
-  if (s.type === "bool" || s.type === "enum") {
-    const vals = s.type === "bool" ? ["true", "false"] : s.values;
-    ctrl = `<select onchange="saveSetting('${s.key}','${s.type}',this.value)">` +
-      `<option value="">(unset${s.default !== undefined ? ", default: " + s.default : ""})</option>` +
-      vals.map((v) => `<option ${isSet && String(cur) === String(v) ? "selected" : ""}>${v}</option>`).join("") +
-      "</select>";
-  } else if (s.type === "string" || s.type === "number") {
-    ctrl = `<input type="text" id="${id}" value="${isSet ? esc(String(cur)) : ""}"` +
-      ` placeholder="${s.default !== undefined ? "default: " + esc(String(s.default)) : "(unset)"}">` +
-      `<button class="small" onclick="saveSetting('${s.key}','${s.type}',document.getElementById('${id}').value)">set</button>`;
-  } else {
-    let text = "";
-    if (isSet) {
-      if (s.type === "list") text = (cur || []).join("\n");
-      else if (s.type === "kv") text = Object.entries(cur || {}).map(([k, v]) => k + "=" + v).join("\n");
-      else text = JSON.stringify(cur, null, 2);
-    }
-    const ph = s.type === "list" ? "one entry per line"
-      : s.type === "kv" ? "KEY=value, one per line" : "JSON";
-    const rows = Math.min(10, Math.max(2, text.split("\n").length));
-    ctrl = `<textarea id="${id}" rows="${rows}" placeholder="${ph}">${esc(text)}</textarea>` +
-      `<button class="small" onclick="saveSetting('${s.key}','${s.type}',document.getElementById('${id}').value)">set</button>`;
-  }
-  row.innerHTML =
-    `<div class="smeta"><span class="skey">${esc(s.key)}</span>` +
+
+  const meta = document.createElement("div");
+  meta.className = "smeta";
+  meta.innerHTML =
+    `<span class="skey">${esc(s.key)}</span>` +
     (isSet ? '<span class="badge group">set</span>' : "") +
-    `<div class="sdesc">${esc(s.desc)}</div></div>` +
-    `<div class="sctrl">${ctrl}` +
-    (isSet ? `<button class="small danger" onclick="saveSetting('${s.key}','clear','')">clear</button>` : "") +
-    "</div>";
+    `<div class="sdesc">${esc(s.desc || "")}</div>`;
+
+  const ctrl = document.createElement("div");
+  ctrl.className = "sctrl";
+  if (s.type === "object" || s.type === "list" || s.type === "kv" || s.type === "json")
+    ctrl.classList.add("wide");
+
+  if (s.type === "bool" || s.type === "enum") {
+    // fixed-choice dropdown that commits immediately
+    const sc = scalarControl(s, cur);
+    sc.node.onchange = () => {
+      const v = sc.collect();
+      v === undefined ? clearSetting(s.key) : commitSetting(s.key, v);
+    };
+    ctrl.appendChild(sc.node);
+  } else {
+    let collect;
+    if (s.type === "object") collect = objectForm(ctrl, s, cur);
+    else if (s.type === "list") collect = listForm(ctrl, s, cur);
+    else if (s.type === "kv") collect = mapForm(ctrl, s, cur);
+    else if (s.type === "json") collect = jsonForm(ctrl, s, cur, isSet);
+    else {
+      const ph = s.default !== undefined ? "default: " + s.default : "(unset)";
+      const sc = scalarControl(s, cur, ph);
+      ctrl.appendChild(sc.node);
+      if (sc.aux) ctrl.appendChild(sc.aux);
+      collect = sc.collect;
+    }
+    ctrl.appendChild(mkbtn("small", "set", () => trySet(s.key, collect)));
+    if (isSet) ctrl.appendChild(mkbtn("small danger", "clear", () => clearSetting(s.key)));
+  }
+
+  row.append(meta, ctrl);
   return row;
 }
 
@@ -1132,37 +1350,6 @@ async function stlSave(apply) {
   } catch (e) { toast(e.message, true); }
 }
 
-async function saveSetting(key, type, raw) {
-  let value = null;
-  try {
-    if (type !== "clear" && raw !== "" && raw != null) {
-      if (type === "bool") value = raw === "true";
-      else if (type === "number") {
-        value = Number(raw);
-        if (Number.isNaN(value)) throw new Error("not a number");
-      } else if (type === "enum" || type === "string") value = raw;
-      else if (type === "list") {
-        value = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-        if (!value.length) value = null;
-      } else if (type === "kv") {
-        value = {};
-        for (const line of raw.split("\n")) {
-          const l = line.trim();
-          if (!l) continue;
-          const i = l.indexOf("=");
-          if (i < 1) throw new Error("expected KEY=value: " + l);
-          value[l.slice(0, i).trim()] = l.slice(i + 1).trim();
-        }
-        if (!Object.keys(value).length) value = null;
-      } else if (type === "json") value = JSON.parse(raw);
-    }
-  } catch (e) { toast("invalid value: " + e.message, true); return; }
-  try {
-    await api("/api/settings-set", { key, value });
-    toast(value === null ? key + " cleared" : key + " set");
-    await refresh();
-  } catch (e) { toast(e.message, true); }
-}
 
 let INSIGHT = null;
 let DOCTOR = null;
