@@ -45,22 +45,34 @@ brew install --cask ghostty font-jetbrains-mono-nerd-font
 ```fish
 git clone git@github.com:jmep17/workspace.git ~/src/workspace
 for d in ~/src/workspace/.config/*/
-    ln -s (path resolve $d) ~/.config/(path basename $d)
+    ln -sfh (path resolve $d) ~/.config/(path basename $d)
 end
 bin/claude-ui   # then click "link" on each Claude config mapping
 ```
 
 The loop links every child of the repo's `.config/` into `~/.config` by
-name — new configs added to the repo later just need the loop re-run (it
-skips nothing, but `ln -s` fails loudly on names that already exist).
+name — re-run it whenever the repo adds *or moves* a config dir: `-fh`
+replaces an existing symlink in place (including one left dangling by a
+repo restructure) instead of failing on it.
 Don't symlink `~/.config` itself: plenty of other tools write machine
 state there, and it would all land in the repo.
 
-If a config directory already exists (a work machine may ship defaults,
-and running fish once auto-creates `~/.config/fish`), move it aside
-first — `mv ~/.config/nvim ~/.config/nvim.bak` — otherwise `ln -s`
-creates the link *inside* the existing directory (a nested
+If a config directory already exists as a real directory (a work machine
+may ship defaults, and running fish once auto-creates `~/.config/fish`),
+move it aside first — `mv ~/.config/nvim ~/.config/nvim.bak` — even with
+`-fh`, `ln` drops the link *inside* an existing directory (a nested
 `~/.config/fish/fish` that the tool never reads) instead of replacing it.
+
+**Migrating from the pre-`.config/` layout** (machines bootstrapped
+before 2026-07-21): the configs used to live at the repo root (`tmux/`,
+`nvim/`, `ghostty/`, `fish/`), so symlinks made back then point at paths
+a `git pull` has since deleted. Running tools keep their in-memory
+config, which hides the break: every old tmux bind still works, but
+anything added after the move (e.g. the layout keybinds) does nothing,
+and `prefix r` fails with "no such file or directory" because it sources
+through the dangling link. Re-run the loop above, then reload the live
+tools: `tmux source-file ~/.config/tmux/tmux.conf` (or `prefix r`),
+`cmd+shift+,` in Ghostty; new fish panes pick theirs up automatically.
 
 - **nvim** reads `~/.config/nvim` — first launch installs plugins and Mason
   tools; see [`.config/nvim/README.md`](.config/nvim/README.md).

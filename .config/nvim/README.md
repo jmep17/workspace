@@ -16,7 +16,7 @@ This is the active config: `~/.config/nvim -> ~/src/workspace/.config/nvim` (cut
 2026-07-16). On a fresh machine:
 
 ```fish
-ln -s ~/src/workspace/.config/nvim ~/.config/nvim
+ln -sfh ~/src/workspace/.config/nvim ~/.config/nvim
 ```
 
 First launch installs plugins (lazy.nvim), then LSP servers/formatters/

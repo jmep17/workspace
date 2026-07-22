@@ -1,5 +1,5 @@
 # Ghostty config — hand-rolled, everything explicit.
-# Bootstrap: ln -s ~/src/workspace/.config/ghostty ~/.config/ghostty
+# Bootstrap: ln -sfh ~/src/workspace/.config/ghostty ~/.config/ghostty
 # Reload with cmd+shift+, — no restart needed for most keys.
 # Docs: ghostty +show-config --default --docs
 
