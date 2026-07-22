@@ -108,6 +108,40 @@ def config_files_state():
                         "broken": p.is_symlink() and not p.exists()})
     return out
 
+def set_enabled(type_, name, enabled):
+    """Move an item between the live type dir and disabled/<type>/. `enabled`
+    is the desired end state. Returns the item's new location string."""
+    if type_ not in ITEM_TYPES:
+        raise ValueError("unknown type")
+    src = resolve_item(type_, name, enabled=not enabled)
+    dst = resolve_item(type_, name, enabled=enabled)
+    if not (src.exists() or src.is_symlink()):
+        raise ValueError(f"{name}: not found "
+                         f"({'enabled' if not enabled else 'disabled'} side)")
+    if dst.exists() or dst.is_symlink():
+        raise ValueError(
+            f"{name}: already exists on the "
+            f"{'enabled' if enabled else 'disabled'} side — resolve by hand")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)  # same filesystem: atomic, content untouched
+    # tidy now-empty dirs in the disabled area so it doesn't accrete cruft
+    disabled_side = src if not enabled else dst
+    _prune_empty_up(disabled_side.parent)
+    return tilde(dst)
+
+def _prune_empty_up(d):
+    """Remove empty dirs from d up to (not including) the config dir."""
+    stop = disabled_dir().parent
+    while d != stop and d.is_dir() and not d.is_symlink():
+        try:
+            if any(d.iterdir()):
+                break
+            parent = d.parent
+            d.rmdir()
+            d = parent
+        except OSError:
+            break
+
 def item_read(type_, name, fname=None, enabled=True):
     root = resolve_item(type_, name, enabled)
     if ITEM_TYPES[type_]["kind"] == "md":

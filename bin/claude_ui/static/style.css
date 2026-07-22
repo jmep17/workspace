@@ -79,7 +79,8 @@
   }
   .row:hover { background: var(--bg1); border-radius: 6px; }
   .row .name { color: var(--aqua); font-weight: bold; overflow-wrap: anywhere; }
-  .row.archived .name { color: var(--fg2); }
+  .row.off { opacity: .55; }
+  .row.off .name { color: var(--fg2); }
   .row .desc { flex: 1 1 12rem; color: var(--fg2); font-size: .82rem;
     overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
     -webkit-box-orient: vertical; }

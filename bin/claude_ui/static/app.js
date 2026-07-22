@@ -1,6 +1,8 @@
-let DATA = { config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
-const TABS = ["mcp", "statusline", "settings", "insight", "costs", "doctor"];
-let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "mcp";
+let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
+const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "settings", "insight", "costs", "doctor"];
+let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "skills";
+let IQ = "";  // inventory filter
 
 async function api(path, body) {
   const res = await fetch(path, body
@@ -213,7 +215,9 @@ function renderTabs() {
   el.innerHTML = "";
   for (const t of allTabs()) {
     const b = document.createElement("button");
-    b.textContent = t === "settings"
+    b.textContent = ITEM_TABS.includes(t)
+      ? t + " · " + ((DATA.items || {})[t] || []).filter((i) => i.enabled).length
+      : t === "settings"
       ? "settings · " + Object.keys((DATA.settings || {}).data || {}).length
       : t === "mcp"
       ? "mcp · " + ((DATA.mcp || {}).servers || []).length
@@ -1449,6 +1453,11 @@ function palItems() {
   for (const t of allTabs())
     out.push({ kind: "go to", label: t,
       run: () => { TAB = t; location.hash = t; render(); } });
+  for (const t of ITEM_TABS)
+    for (const s of (DATA.items || {})[t] || [])
+      out.push({ kind: t.replace(/s$/, ""), label: s.name,
+        hint: (s.enabled ? "" : "(disabled) ") + (s.description || ""),
+        run: () => { TAB = t; location.hash = t; IQ = s.name; render(); } });
   for (const id of ["CLAUDE.md", "settings.json", "keybindings.json"])
     out.push({ kind: "edit", label: id, run: () => openEditor(id) });
   out.push({ kind: "action", label: "add mcp server",
@@ -1724,6 +1733,87 @@ function closeEditor() {
   refresh();
 }
 
+async function toggleItem(type, name, enabled) {
+  try {
+    await api("/api/item-toggle", { type, name, enabled });
+    toast(name + (enabled ? " enabled" : " disabled — moved to disabled/") +
+      " · applies to new sessions");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+function itemBadges(s) {
+  return (s.symlink && !s.broken ? '<span class="badge link">symlink</span>' : "") +
+    (s.broken ? '<span class="badge warn">broken</span>' : "") +
+    (s.incomplete && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "") +
+    (s.todo ? '<span class="badge warn" title="leftover TODO placeholder inside">TODO</span>' : "") +
+    (s.name_mismatch ? '<span class="badge warn" title="frontmatter name does not match the folder name">name≠dir</span>' : "") +
+    (s.long_desc ? '<span class="badge warn" title="description over 1024 characters — may be truncated">long desc</span>' : "");
+}
+
+function renderInventory() {
+  const el = document.getElementById("itemsview");
+  const all = (DATA.items || {})[TAB] || [];
+  const q = IQ.toLowerCase();
+  const items = all.filter(
+    (s) => !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q));
+  const on = items.filter((s) => s.enabled);
+  const off = items.filter((s) => !s.enabled);
+  el.innerHTML =
+    `<div class="sethead">${TAB} in <b>${esc(DATA.config_dir)}/${TAB}</b>` +
+    ` — everything real on this machine. Disabling moves an item to ` +
+    `<b>disabled/${TAB}/</b>; nothing is deleted. Changes apply to new sessions.</div>`;
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  const inp = document.createElement("input");
+  inp.type = "search";
+  inp.id = "iq";
+  inp.placeholder = "filter " + TAB + "…";
+  inp.value = IQ;
+  inp.oninput = () => {
+    IQ = inp.value;
+    renderInventory();
+    const n = document.getElementById("iq");
+    n.focus();
+    n.setSelectionRange(n.value.length, n.value.length);
+  };
+  bar.appendChild(inp);
+  el.appendChild(bar);
+
+  const section = (list, label, enabled) => {
+    if (!list.length && !(enabled && !all.length)) return;
+    const h = document.createElement("h2");
+    h.innerHTML = label + ` <span class="count">· ${list.length}</span>`;
+    el.appendChild(h);
+    if (!list.length) {
+      const d = document.createElement("div");
+      d.className = "empty";
+      d.textContent = q ? "no matches" : "nothing here";
+      el.appendChild(d);
+      return;
+    }
+    for (const s of list) {
+      const row = document.createElement("div");
+      row.className = "row" + (enabled ? "" : " off");
+      row.innerHTML =
+        `<span class="name" title="${esc(s.path || "")}">${esc(s.name)}</span>` +
+        itemBadges(s) +
+        `<span class="desc">${esc(s.description || "")}</span>`;
+      const act = document.createElement("span");
+      act.className = "actions";
+      const b = document.createElement("button");
+      b.textContent = enabled ? "disable" : "enable";
+      b.className = "small" + (enabled ? " danger" : "");
+      b.onclick = () => toggleItem(TAB, s.name, !enabled);
+      act.appendChild(b);
+      row.appendChild(act);
+      el.appendChild(row);
+    }
+  };
+  section(on, "enabled", true);
+  section(off, "disabled", false);
+}
+
 function render() {
   closeMenu();
   renderHeader();
@@ -1732,6 +1822,7 @@ function render() {
     insight: "insightview", costs: "costsview", doctor: "doctorview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
+  document.getElementById("itemsview").hidden = isEditor || !ITEM_TABS.includes(TAB);
   if (isEditor) {
     for (const v of Object.values(views)) document.getElementById(v).hidden = true;
     renderEditor();
@@ -1739,6 +1830,7 @@ function render() {
   }
   for (const [t, v] of Object.entries(views))
     document.getElementById(v).hidden = TAB !== t;
+  if (ITEM_TABS.includes(TAB)) { renderInventory(); return; }
   if (TAB === "settings") { renderSettings(); return; }
   if (TAB === "mcp") { renderMcp(); return; }
   if (TAB === "statusline") { renderStatusline(); return; }
@@ -1749,7 +1841,7 @@ function render() {
 
 async function refresh() {
   DATA = await api("/api/state");
-  if (!TABS.includes(TAB)) TAB = "mcp";
+  if (!TABS.includes(TAB)) TAB = "skills";
   render();
 }
 

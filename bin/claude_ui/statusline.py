@@ -160,6 +160,17 @@ def ccusage_daily(argv):
     out = subprocess.run(argv, capture_output=True, text=True, timeout=300)
     return json.loads(out.stdout).get("daily") or []
 
+def claude_day_cost(row):
+    # ccusage's totalCost sums every model it saw; a local model served through
+    # the same CLI (ollama/proxy) lands in modelBreakdowns under its own id and
+    # would inflate the number. Count Claude models only. Older ccusage builds
+    # omit the breakdown — fall back to totalCost there.
+    mb = row.get("modelBreakdowns")
+    if isinstance(mb, list) and mb:
+        return sum(float(b.get("cost") or 0) for b in mb
+                   if "claude" in (b.get("modelName") or "").lower())
+    return float(row.get("totalCost") or 0)
+
 def refresh_costs():
     today = datetime.date.today()
     month_start = today.replace(day=1)
@@ -196,7 +207,7 @@ def refresh_costs():
             try:
                 # "date" up to ccusage v17, renamed to "period" in later releases
                 day = datetime.date.fromisoformat(r.get("period") or r.get("date") or "")
-                c = float(r.get("totalCost") or 0)
+                c = claude_day_cost(r)
             except (ValueError, TypeError):
                 continue
             if day >= month_start:
@@ -361,15 +372,22 @@ def f_cachetok():
     return " ".join((["\\u26a1" + kfmt(cr)] if cr else [])
                     + (["+" + kfmt(cc)] if cc else []))
 
+def _claude_session():
+    # This session's own model. A non-Claude id (local model via ollama/proxy)
+    # is priced wrong by the harness, so we don't surface its cost.
+    return "claude" in f_modelid().lower()
+
 def f_cost():
+    if not _claude_session():
+        return "$0.00"
     c = cost.get("total_cost_usd")
     return "$" + format(c, ".2f") if isinstance(c, (int, float)) else ""
 
 def f_costhour():
     c, ms = cost.get("total_cost_usd"), cost.get("total_duration_ms")
     # under a minute of wall clock the extrapolation is meaningless
-    if not isinstance(c, (int, float)) or not isinstance(ms, (int, float)) \\
-            or ms < 60000:
+    if not _claude_session() or not isinstance(c, (int, float)) \\
+            or not isinstance(ms, (int, float)) or ms < 60000:
         return ""
     return "$" + format(c * 3600000 / ms, ".2f") + "/h"
 

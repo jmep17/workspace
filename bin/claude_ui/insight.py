@@ -223,16 +223,18 @@ def _row_cost(row, pin, pout):
     i, o, cw, cr = row[0], row[1], row[2], row[3]
     return (i * pin + o * pout + cw * pin * 1.25 + cr * pin * 0.1) / 1e6
 
-# Models dropped from the cost dashboard entirely (no row, no tokens, no total).
-# "<synthetic>" is Claude Code's placeholder for messages with no real API call;
-# user-configured substrings (e.g. local model ids) are matched case-insensitively.
+# The dashboard prices Claude models only. Anything else served through the same
+# CLI — local models via ollama/proxies, the "<synthetic>" placeholder — is
+# dropped entirely (no row, no tokens, no total). A `pricing` override opts a
+# non-Claude id back in, since setting a price signals intent to count it.
 def _excluded(model):
     m = (model or "").lower()
-    subs = ["<synthetic>"]
-    ex = read_cfg().get("exclude_models")
-    if isinstance(ex, list):
-        subs += [str(s).lower() for s in ex]
-    return any(s in m for s in subs if s)
+    if "claude" in m:
+        return False
+    overrides = read_cfg().get("pricing")
+    if isinstance(overrides, dict):
+        return not any(str(sub).lower() in m for sub in overrides)
+    return True
 
 def cost_stats(rescan=False):
     st = transcript_stats(rescan)

@@ -10,8 +10,8 @@ import sys
 import urllib.parse
 import webbrowser
 
-from .core import TOKEN, config_dir, read_cfg, set_config_dir, tilde
-from .items import config_files_state
+from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
+from .items import config_files_state, scan_items, set_enabled
 from .mcp import mcp_machine_set, mcp_state, mcp_test
 from .settings import SETTINGS_SCHEMA, file_read, file_save, hook_test, settings_set, settings_state
 from .statusline import statusline_save, statusline_state
@@ -79,6 +79,7 @@ class Handler(BaseHTTPRequestHandler):
                       "application/manifest+json")
         elif self.path == "/api/state":
             self.send(200, {
+                "items": {t: scan_items(t) for t in ITEM_TYPES},
                 "config_files": config_files_state(),
                 "settings": settings_state(),
                 "mcp": mcp_state(),
@@ -118,6 +119,10 @@ class Handler(BaseHTTPRequestHandler):
             if action == "config-dir":
                 set_config_dir((req.get("path") or "").strip())
                 self.send(200, {"ok": True})
+            elif action == "item-toggle":
+                path = set_enabled(req.get("type", ""), req.get("name", ""),
+                                   bool(req.get("enabled")))
+                self.send(200, {"ok": True, "path": path})
             elif action == "settings-set":
                 settings_set(req.get("key", ""), req.get("value"))
                 self.send(200, {"ok": True})
