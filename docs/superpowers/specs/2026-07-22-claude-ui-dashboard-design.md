@@ -54,8 +54,20 @@ One view of everything discrete on the machine, grouped by kind:
   files, symlinks (displayed as items; their link-ness may be badged but is
   otherwise irrelevant). Name and frontmatter description shown per item.
 - **MCP servers** — user-scope entries from `~/.claude.json` `mcpServers`.
+  Beyond inventory and enable/disable, the MCP tab also supports **add**,
+  **edit-in-place**, **delete**, and a reachability **test** for a server —
+  the same edit-and-manage affordance the editor gives every other item.
+  Add/delete are explicit, confirmed, per-server user actions (the same
+  exception the enable/disable toggle carries), never bulk or implicit.
 - **Config files** — `settings.json`, `CLAUDE.md`, `keybindings.json` (shown
   when present; absent files are simply absent).
+
+Retained observability features (not part of the config surface but carried
+forward from the tool): a context-**budget/insight** view and a **costs**
+view (both read-only, parsing local session transcripts), lifecycle-**hook
+test-fire**, and **`claude -p` assist** for improving/reviewing a file on
+request. All are observe- or edit-on-request actions consistent with the
+identity above.
 
 There are no derived states, drift, or provenance — an item is *enabled* or
 *disabled*, and that is all.
