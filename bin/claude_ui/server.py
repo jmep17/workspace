@@ -11,8 +11,8 @@ import urllib.parse
 import webbrowser
 
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
-from .items import config_files_state, scan_items, set_enabled
-from .mcp import mcp_machine_set, mcp_state, mcp_test
+from .items import config_files_state, item_read, item_save, scan_items, set_enabled
+from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from .settings import SETTINGS_SCHEMA, file_read, file_save, hook_test, settings_set, settings_state
 from .statusline import statusline_save, statusline_state
 from .insight import cost_stats, insight_budget, usage_stats
@@ -94,6 +94,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, file_read((q.get("id") or [""])[0]))
             except ValueError as e:
                 self.send(400, {"error": str(e)})
+        elif self.path.startswith("/api/item?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            get = lambda k, d="": (q.get(k) or [d])[0]
+            try:
+                self.send(200, item_read(get("type"), get("name"),
+                                         get("file") or None,
+                                         get("enabled", "1") == "1"))
+            except (ValueError, OSError) as e:
+                self.send(400, {"error": str(e)})
         elif self.path.startswith("/api/insight"):
             rescan = "rescan" in self.path
             self.send(200, {"budget": insight_budget(),
@@ -129,6 +138,10 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "file-save":
                 file_save(req.get("id", ""), req.get("content", ""))
                 self.send(200, {"ok": True})
+            elif action == "item-save":
+                self.send(200, {"ok": True, **item_save(
+                    req.get("type", ""), req.get("name", ""), req.get("file"),
+                    req.get("content", ""), bool(req.get("enabled", True)))})
             elif action == "hook-test":
                 self.send(200, hook_test(req.get("command", ""), req.get("event", "")))
             elif action == "statusline-save":
@@ -139,6 +152,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True})
             elif action == "mcp-delete":
                 mcp_machine_set(req.get("name", ""), None)
+                self.send(200, {"ok": True})
+            elif action == "mcp-toggle":
+                mcp_set_enabled(req.get("name", ""), bool(req.get("enabled")))
                 self.send(200, {"ok": True})
             elif action == "mcp-test":
                 self.send(200, mcp_test(req.get("name", "")))

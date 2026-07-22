@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from .core import (CONFIG_FILES, ITEM_TYPES, NAME_RE, config_dir, disabled_dir,
-                   parse_frontmatter, tilde)
+from .core import (CONFIG_FILES, ITEM_TYPES, NAME_RE, atomic_write, config_dir,
+                   disabled_dir, parse_frontmatter, tilde)
 
 
 MAX_EDIT = 2 * 1024 * 1024
@@ -142,6 +142,20 @@ def _prune_empty_up(d):
         except OSError:
             break
 
+def _item_file_rel(f):
+    """Validate a within-item relative file path (no traversal, no dotfiles)."""
+    rel = Path(*[p for p in f.split("/") if p and p != ".." and not p.startswith(".")])
+    if not rel.parts or str(rel) != f:
+        raise ValueError("bad file name")
+    return rel
+
+def _skill_files(root):
+    return sorted(
+        str(p.relative_to(root)) for p in root.rglob("*")
+        if p.is_file() and p.stat().st_size <= MAX_EDIT
+        and not any(part.startswith(".") for part in p.relative_to(root).parts)
+    )[:200]
+
 def item_read(type_, name, fname=None, enabled=True):
     root = resolve_item(type_, name, enabled)
     if ITEM_TYPES[type_]["kind"] == "md":
@@ -152,17 +166,25 @@ def item_read(type_, name, fname=None, enabled=True):
                 "content": root.read_text(errors="replace"), "path": tilde(root)}
     if not root.is_dir():  # follows symlinks
         raise ValueError(f"{name}: not found")
-    files = sorted(
-        str(p.relative_to(root)) for p in root.rglob("*")
-        if p.is_file() and p.stat().st_size <= MAX_EDIT
-        and not any(part.startswith(".") for part in p.relative_to(root).parts)
-    )[:200]
+    files = _skill_files(root)
     f = fname or ("SKILL.md" if "SKILL.md" in files or not files else files[0])
-    rel = Path(*[p for p in f.split("/") if p and p != ".." and not p.startswith(".")])
-    if not rel.parts or str(rel) != f:
-        raise ValueError("bad file name")
-    target = root / rel
+    target = root / _item_file_rel(f)
     return {"type": type_, "name": name, "enabled": enabled,
             "files": files, "file": f, "exists": target.is_file(),
             "content": target.read_text(errors="replace") if target.is_file() else "",
             "path": tilde(target)}
+
+def item_save(type_, name, fname, content, enabled=True):
+    if not isinstance(content, str) or len(content) > MAX_EDIT:
+        raise ValueError("bad content")
+    root = resolve_item(type_, name, enabled)
+    if ITEM_TYPES[type_]["kind"] == "md":
+        if not root.is_file():
+            raise ValueError(f"{name}: not found")
+        atomic_write(root, content)
+        return {"path": tilde(root)}
+    if not root.is_dir():
+        raise ValueError(f"{name}: not found")
+    target = root / _item_file_rel(fname or "SKILL.md")
+    atomic_write(target, content)
+    return {"path": tilde(target)}

@@ -579,9 +579,10 @@ function renderMcp() {
   }
   for (const s of st.servers) {
     const row = document.createElement("div");
-    row.className = "row";
+    row.className = "row" + (s.enabled ? "" : " off");
     row.innerHTML =
       `<span class="name">${esc(s.name)}</span>` +
+      (s.enabled ? "" : '<span class="badge link">disabled</span>') +
       `<span class="desc">${esc(mcpSummary(s.config))}</span>`;
     const act = document.createElement("span");
     act.className = "actions";
@@ -593,15 +594,27 @@ function renderMcp() {
       act.appendChild(b);
     };
     btn("test", () => mcpTest(s.name));
-    if (machineOk)
+    if (machineOk && s.enabled)
       btn("edit", () => {
         MCPEDIT = { name: s.name, isNew: false,
           json: JSON.stringify(s.config, null, 2) };
         render();
       });
+    if (machineOk)
+      btn(s.enabled ? "disable" : "enable", () => mcpToggle(s.name, !s.enabled),
+        "small" + (s.enabled ? " danger" : ""));
     row.appendChild(act);
     el.appendChild(row);
   }
+}
+
+async function mcpToggle(name, enabled) {
+  try {
+    await api("/api/mcp-toggle", { name, enabled });
+    toast(name + (enabled ? " enabled" : " disabled — parked in disabled/mcp-servers.json") +
+      " · applies to new sessions");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function mcpTest(name) {
@@ -1457,7 +1470,9 @@ function palItems() {
     for (const s of (DATA.items || {})[t] || [])
       out.push({ kind: t.replace(/s$/, ""), label: s.name,
         hint: (s.enabled ? "" : "(disabled) ") + (s.description || ""),
-        run: () => { TAB = t; location.hash = t; IQ = s.name; render(); } });
+        run: () => s.broken
+          ? (() => { TAB = t; location.hash = t; IQ = s.name; render(); })()
+          : openItemEditor(t, s.name, null, s.enabled) });
   for (const id of ["CLAUDE.md", "settings.json", "keybindings.json"])
     out.push({ kind: "edit", label: id, run: () => openEditor(id) });
   out.push({ kind: "action", label: "add mcp server",
@@ -1564,6 +1579,16 @@ async function openEditor(id) {
   } catch (e) { toast(e.message, true); }
 }
 
+async function openItemEditor(type, name, file, enabled) {
+  try {
+    const q = "type=" + encodeURIComponent(type) + "&name=" + encodeURIComponent(name) +
+      "&enabled=" + (enabled ? "1" : "0") +
+      (file ? "&file=" + encodeURIComponent(file) : "");
+    EDITING = { item: true, ...(await api("/api/item?" + q)) };
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
 // Minimal markdown renderer for the editor preview (headings, lists, code
 // fences, inline code/bold/italic/links, blockquotes) — enough to sanity-check
 // a SKILL.md without any dependency.
@@ -1652,9 +1677,22 @@ function renderEditor() {
   el.innerHTML =
     `<div class="sethead">editing <b>${esc(f.path)}</b>` +
     (f.exists ? "" : " (new file — created on save)") +
-    (f.id === "CLAUDE.md" || f.id === "settings.json" ? " · applies to new sessions" : "") +
+    (f.item && !f.enabled ? " · this item is disabled" : "") +
+    (f.id === "CLAUDE.md" || f.id === "settings.json" || f.item ? " · applies to new sessions" : "") +
     `</div>`;
-  const isMd = (f.path || "").endsWith(".md");
+  if (f.item && f.files && f.files.length > 1) {
+    const tabs = document.createElement("div");
+    tabs.className = "ftabs";
+    for (const name of f.files) {
+      const b = document.createElement("button");
+      b.className = "small" + (name === f.file ? " on" : "");
+      b.textContent = name;
+      b.onclick = () => { edSync(); openItemEditor(f.type, f.name, name, f.enabled); };
+      tabs.appendChild(b);
+    }
+    el.appendChild(tabs);
+  }
+  const isMd = (f.item ? f.file : f.path || "").endsWith(".md");
   if (f.preview && isMd) {
     const pv = document.createElement("div");
     pv.className = "mdprev";
@@ -1722,7 +1760,14 @@ function renderEditor() {
 async function saveFile() {
   edSync();
   try {
-    await api("/api/file-save", { id: EDITING.id, content: EDITING.content });
+    if (EDITING.item) {
+      await api("/api/item-save", { type: EDITING.type, name: EDITING.name,
+        file: EDITING.file, content: EDITING.content, enabled: EDITING.enabled });
+      if (EDITING.files && !EDITING.files.includes(EDITING.file))
+        EDITING.files.push(EDITING.file);
+    } else {
+      await api("/api/file-save", { id: EDITING.id, content: EDITING.content });
+    }
     toast(EDITING.path + " saved");
     EDITING.exists = true;
   } catch (e) { toast(e.message, true); }
@@ -1801,6 +1846,13 @@ function renderInventory() {
         `<span class="desc">${esc(s.description || "")}</span>`;
       const act = document.createElement("span");
       act.className = "actions";
+      if (!s.broken) {
+        const eb = document.createElement("button");
+        eb.textContent = "edit";
+        eb.className = "small";
+        eb.onclick = () => openItemEditor(TAB, s.name, null, enabled);
+        act.appendChild(eb);
+      }
       const b = document.createElement("button");
       b.textContent = enabled ? "disable" : "enable";
       b.className = "small" + (enabled ? " danger" : "");
