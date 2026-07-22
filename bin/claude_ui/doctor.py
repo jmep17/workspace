@@ -94,8 +94,13 @@ def doctor():
 
     # item quality
     for t in ITEM_TYPES:
-        for it in scan_items(t):
+        items = scan_items(t)
+        live = {it["name"] for it in items if it["enabled"]}
+        for it in items:
             where = "" if it["enabled"] else " (disabled)"
+            if not it["enabled"] and it["name"] in live:
+                add("warn", t, f"{it['name']}: exists both enabled and disabled "
+                               "— re-enabling it would fail; resolve by hand")
             if it.get("broken"):
                 add("warn", t, f"{it['name']}{where}: broken symlink")
             if it.get("incomplete"):
