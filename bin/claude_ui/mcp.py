@@ -39,10 +39,23 @@ def validate_mcp_config(config):
     if not (config.get("command") or config.get("url")):
         raise ValueError("server config needs a 'command' (stdio) or 'url' (http/sse/ws)")
 
-def mcp_machine_set(name, config):
-    """Set (or remove, config=None) a server in ~/.claude.json mcpServers."""
+def mcp_machine_set(name, config, enabled=True):
+    """Set (or remove, config=None) a server. `enabled` chooses the store:
+    the live ~/.claude.json, or the parked disabled/mcp-servers.json — so a
+    disabled server can be edited in place without silently re-enabling it."""
     if not NAME_RE.match(name or ""):
         raise ValueError("bad server name")
+    if not enabled:
+        servers, err = _disabled_servers()
+        if err:
+            raise ValueError(f"{tilde(_disabled_path())}: {err} — fix it by hand")
+        if config is None:
+            servers.pop(name, None)
+        else:
+            validate_mcp_config(config)
+            servers[name] = config
+        _write_disabled(servers)
+        return
     data, err = _read_json_object(CLAUDE_JSON)
     if err:
         raise ValueError(f"~/.claude.json: {err} — refusing to touch it")

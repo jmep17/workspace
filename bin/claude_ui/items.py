@@ -1,6 +1,7 @@
 """Machine inventory: the items actually in the Claude config dir."""
 
 from pathlib import Path
+import json
 
 from .core import (CONFIG_FILES, ITEM_TYPES, NAME_RE, atomic_write, config_dir,
                    disabled_dir, parse_frontmatter, tilde)
@@ -116,8 +117,7 @@ def set_enabled(type_, name, enabled):
     src = resolve_item(type_, name, enabled=not enabled)
     dst = resolve_item(type_, name, enabled=enabled)
     if not (src.exists() or src.is_symlink()):
-        raise ValueError(f"{name}: not found "
-                         f"({'enabled' if not enabled else 'disabled'} side)")
+        raise ValueError(f"{name}: not {'enabled' if not enabled else 'disabled'}")
     if dst.exists() or dst.is_symlink():
         raise ValueError(
             f"{name}: already exists on the "
@@ -174,6 +174,15 @@ def item_read(type_, name, fname=None, enabled=True):
             "content": target.read_text(errors="replace") if target.is_file() else "",
             "path": tilde(target)}
 
+def _reject_bad_json(path, content):
+    """A .json file must parse before we overwrite it, so a bad save can't
+    corrupt config Claude Code reads. Mirrors settings.file_save."""
+    if path.suffix == ".json" and content.strip():
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"invalid JSON: {e}") from None
+
 def item_save(type_, name, fname, content, enabled=True):
     if not isinstance(content, str) or len(content) > MAX_EDIT:
         raise ValueError("bad content")
@@ -186,5 +195,6 @@ def item_save(type_, name, fname, content, enabled=True):
     if not root.is_dir():
         raise ValueError(f"{name}: not found")
     target = root / _item_file_rel(fname or "SKILL.md")
+    _reject_bad_json(target, content)
     atomic_write(target, content)
     return {"path": tilde(target)}

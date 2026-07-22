@@ -491,6 +491,7 @@ function mcpEditPanel() {
   p.innerHTML =
     `<div class="bar"><input type="text" id="mcpname" placeholder="server name"` +
     ` value="${esc(MCPEDIT.name || "")}" ${MCPEDIT.isNew ? "" : "disabled"}>` +
+    (MCPEDIT.enabled === false ? '<span class="badge link">disabled</span>' : "") +
     `<span style="flex:1"></span>` +
     (MCPEDIT.isNew ? "" :
       `<button class="small danger" onclick="mcpDelete()">delete</button>`) +
@@ -516,19 +517,23 @@ async function mcpSave() {
   try { config = JSON.parse(document.getElementById("mcpjson").value); }
   catch (e) { toast("invalid JSON: " + e.message, true); return; }
   const name = (document.getElementById("mcpname").value || "").trim();
+  const enabled = MCPEDIT.enabled !== false;
   try {
-    await api("/api/mcp-save", { name, config });
-    toast(name + " saved to " + DATA.mcp.machine_path + " — applies to new sessions");
+    await api("/api/mcp-save", { name, config, enabled });
+    toast(name + " saved" + (enabled ? "" : " (still disabled)") +
+      " — applies to new sessions");
     MCPEDIT = null;
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
 async function mcpDelete() {
+  const enabled = MCPEDIT.enabled !== false;
   if (!(await mconfirm("delete " + MCPEDIT.name,
-    "Removes it from " + DATA.mcp.machine_path + ".", "delete"))) return;
+    enabled ? "Removes it from " + DATA.mcp.machine_path + "."
+      : "Removes it from disabled/mcp-servers.json.", "delete"))) return;
   try {
-    await api("/api/mcp-delete", { name: MCPEDIT.name });
+    await api("/api/mcp-delete", { name: MCPEDIT.name, enabled });
     toast(MCPEDIT.name + " deleted");
     MCPEDIT = null;
     await refresh();
@@ -594,9 +599,9 @@ function renderMcp() {
       act.appendChild(b);
     };
     btn("test", () => mcpTest(s.name));
-    if (machineOk && s.enabled)
+    if (machineOk)
       btn("edit", () => {
-        MCPEDIT = { name: s.name, isNew: false,
+        MCPEDIT = { name: s.name, isNew: false, enabled: s.enabled,
           json: JSON.stringify(s.config, null, 2) };
         render();
       });

@@ -148,10 +148,12 @@ class Handler(BaseHTTPRequestHandler):
                 statusline_save(req.get("config"), bool(req.get("apply")))
                 self.send(200, {"ok": True})
             elif action == "mcp-save":
-                mcp_machine_set(req.get("name", ""), req.get("config"))
+                mcp_machine_set(req.get("name", ""), req.get("config"),
+                                bool(req.get("enabled", True)))
                 self.send(200, {"ok": True})
             elif action == "mcp-delete":
-                mcp_machine_set(req.get("name", ""), None)
+                mcp_machine_set(req.get("name", ""), None,
+                                bool(req.get("enabled", True)))
                 self.send(200, {"ok": True})
             elif action == "mcp-toggle":
                 mcp_set_enabled(req.get("name", ""), bool(req.get("enabled")))
