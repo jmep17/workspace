@@ -20,7 +20,8 @@ from .core import CONFIG_FILES, atomic_write, config_dir, tilde
 #                    text input with datalist, since datalist on type=number is
 #                    ignored by Safari/Firefox)
 #   string           free text input (prefer combo when suggestions exist)
-#   enum             fixed-choice dropdown; requires "values"
+#   enum             fixed-choice dropdown; requires "values" (live docs-
+#                    discovered values for the key are merged in as options)
 #   combo            free text with suggested "values" (datalist); freeform still allowed
 #   list             one-value-per-row editor; optional "item_values" suggestions per row
 #   kv               key/value row editor. Optional "value_type": "number" for numeric
@@ -502,37 +503,60 @@ SETTINGS_SCHEMA = [s for s in SETTINGS_SCHEMA
 
 SETTINGS_KEY_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$-]*$")
 
-# Live model IDs for the model/fallbackModel datalists, fetched once in the
-# background at server start by parsing the "Claude API ID/alias" table rows
-# of the public models-overview docs page (no auth needed). On any failure
-# the list stays empty and MODEL_ALIASES remains the static fallback.
+# Live option values fetched once in the background at server start from the
+# public docs (no auth needed); on any failure the statics above remain the
+# fallback. Two sources:
+#   - models overview page: "Claude API ID/alias" table rows → model IDs for
+#     the model/fallbackModel suggestions
+#   - settings reference page: per-key table rows, where allowed values appear
+#     as backtick-wrapped quoted strings (`"latest"`) — merged into that
+#     setting's options/suggestions (incl. enum dropdowns, via suggestFor)
 MODELS_DOC_URL = "https://platform.claude.com/docs/en/about-claude/models/overview.md"
+SETTINGS_DOC_URL = "https://code.claude.com/docs/en/settings.md"
 
-_model_ids: list = []
+_docs_values: dict = {}
 
-def _fetch_model_ids():
-    ids = []
+def _get(url):
+    req = urllib.request.Request(url, headers={"user-agent": "claude-ui"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return r.read().decode(errors="replace")
+
+def _fetch_docs_values():
+    found = {}
     try:
-        req = urllib.request.Request(MODELS_DOC_URL,
-                                     headers={"user-agent": "claude-ui"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            text = r.read().decode(errors="replace")
-        for line in text.splitlines():
+        ids = []
+        for line in _get(MODELS_DOC_URL).splitlines():
             if line.lstrip("| *").startswith("Claude API"):
                 ids += [c for c in (c.strip() for c in line.split("|"))
                         if re.fullmatch(r"claude-[a-z0-9-]+", c)]
+        if ids:
+            found["model"] = found["fallbackModel"] = list(dict.fromkeys(ids))
     except (OSError, ValueError):
         pass
-    _model_ids[:] = list(dict.fromkeys(ids))
+    try:
+        keys = {s["key"] for s in SETTINGS_SCHEMA
+                if s["type"] in ("enum", "combo", "string", "number", "list")}
+        for line in _get(SETTINGS_DOC_URL).splitlines():
+            if not line.startswith("|"):
+                continue
+            key = line.split("|")[1].strip().strip("`")
+            if key not in keys:
+                continue
+            vals = [v for v in dict.fromkeys(re.findall(r'`"([^"`]*)"`', line))
+                    if len(v) <= 40]
+            if vals:
+                found[key] = found.get(key, []) + vals
+    except (OSError, ValueError, IndexError):
+        pass
+    _docs_values.update(found)
 
-def start_model_fetch():
-    threading.Thread(target=_fetch_model_ids, daemon=True).start()
+def start_docs_fetch():
+    threading.Thread(target=_fetch_docs_values, daemon=True).start()
 
 def suggest_state():
     out = dict(_local_suggest())
-    if _model_ids:
-        out["model"] = _model_ids
-        out["fallbackModel"] = _model_ids
+    for key, vals in _docs_values.items():
+        out[key] = list(dict.fromkeys(out.get(key, []) + vals))
     return out
 
 @functools.lru_cache(maxsize=1)

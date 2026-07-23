@@ -318,9 +318,11 @@ function scalarControl(f, value, ph) {
   if (f.type === "enum") {
     const sel = document.createElement("select");
     sel.appendChild(opt("", "(unset" + (f.default !== undefined ? ", default: " + f.default : "") + ")"));
-    for (const v of f.values) sel.appendChild(opt(String(v)));
+    // schema values plus any live docs-discovered values for this key
+    const vals = suggestFor(f.key, f.values);
+    for (const v of vals) sel.appendChild(opt(v));
     // keep an out-of-vocabulary current value visible instead of showing "(unset)"
-    if (value !== undefined && value !== null && !f.values.map(String).includes(String(value)))
+    if (value !== undefined && value !== null && !vals.includes(String(value)))
       sel.appendChild(opt(String(value), String(value) + " (current)"));
     if (value !== undefined && value !== null) sel.value = String(value);
     return { node: sel, collect: () => sel.value === "" ? undefined : sel.value };
