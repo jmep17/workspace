@@ -36,6 +36,7 @@ return {
     { "<leader>sb", function() Snacks.picker.lines() end, desc = "Buffer lines" },
     { "<leader>sd", function() Snacks.picker.diagnostics() end, desc = "Diagnostics" },
     { "<leader>sD", function() Snacks.picker.diagnostics_buffer() end, desc = "Buffer diagnostics" },
+    { "<leader>se", function() Snacks.picker.diagnostics_buffer({ severity = vim.diagnostic.severity.ERROR }) end, desc = "Buffer errors" },
     { "<leader>sh", function() Snacks.picker.help() end, desc = "Help pages" },
     { "<leader>sk", function() Snacks.picker.keymaps() end, desc = "Keymaps" },
     { "<leader>sr", function() Snacks.picker.resume() end, desc = "Resume last picker" },
