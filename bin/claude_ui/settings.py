@@ -3,7 +3,6 @@
 from pathlib import Path
 import functools
 import json
-import os
 import re
 import subprocess
 import threading
@@ -504,9 +503,9 @@ SETTINGS_SCHEMA = [s for s in SETTINGS_SCHEMA
 SETTINGS_KEY_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$-]*$")
 
 # Live model IDs for the model/fallbackModel datalists, fetched once in the
-# background at server start: the Models API when ANTHROPIC_API_KEY is set,
-# else the public docs page (parsing the "Claude API ID/alias" table rows),
-# else empty — MODEL_ALIASES stays the static fallback either way.
+# background at server start by parsing the "Claude API ID/alias" table rows
+# of the public models-overview docs page (no auth needed). On any failure
+# the list stays empty and MODEL_ALIASES remains the static fallback.
 MODELS_DOC_URL = "https://platform.claude.com/docs/en/about-claude/models/overview.md"
 
 _model_ids: list = []
@@ -514,24 +513,15 @@ _model_ids: list = []
 def _fetch_model_ids():
     ids = []
     try:
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if key:
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/models?limit=1000",
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                ids = [m["id"] for m in json.load(r).get("data", [])
-                       if isinstance(m, dict) and isinstance(m.get("id"), str)]
-        if not ids:
-            req = urllib.request.Request(MODELS_DOC_URL,
-                                         headers={"user-agent": "claude-ui"})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                text = r.read().decode(errors="replace")
-            for line in text.splitlines():
-                if line.lstrip("| *").startswith("Claude API"):
-                    ids += [c for c in (c.strip() for c in line.split("|"))
-                            if re.fullmatch(r"claude-[a-z0-9-]+", c)]
-    except (OSError, ValueError, KeyError):
+        req = urllib.request.Request(MODELS_DOC_URL,
+                                     headers={"user-agent": "claude-ui"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            text = r.read().decode(errors="replace")
+        for line in text.splitlines():
+            if line.lstrip("| *").startswith("Claude API"):
+                ids += [c for c in (c.strip() for c in line.split("|"))
+                        if re.fullmatch(r"claude-[a-z0-9-]+", c)]
+    except (OSError, ValueError):
         pass
     _model_ids[:] = list(dict.fromkeys(ids))
 
