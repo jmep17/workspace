@@ -35,7 +35,11 @@ from .core import CONFIG_FILES, atomic_write, config_dir, tilde
 # In string/combo inputs a literal "" (two quote characters) writes the empty
 # string; a blank input unsets the key.
 MODEL_ALIASES = ["default", "best", "fable", "sonnet", "opus", "haiku",
-                 "sonnet[1m]", "opus[1m]", "opusplan", "opusplan[1m]"]
+                 "sonnet[1m]", "opus[1m]", "opusplan", "opusplan[1m]",
+                 # full model IDs (aliases resolve to these; snapshot 2026-07)
+                 "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
+                 "claude-opus-4-6", "claude-opus-4-5", "claude-sonnet-5",
+                 "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"]
 LANGS = ["en", "ja", "fr", "es", "de", "zh", "ko", "pt", "it", "ru"]
 
 # Documented env vars, suggested as keys in the `env` editor. Extracted from
