@@ -283,13 +283,25 @@ function datalist(values) {
   return dl;
 }
 
-// combo suggestions, augmented with live data for a couple of keys
-function comboSuggest(s) {
-  const base = (s.values || []).slice();
-  if (s.key === "outputStyle")
-    for (const it of ((DATA.items || {})["output-styles"] || []))
-      if (it.name && !base.includes(it.name)) base.push(it.name);
-  return base;
+// Live datalist suggestions per setting key; a ":key" suffix targets a kv
+// control's key input. Merged with static schema values and the server's
+// machine-local DATA.suggest payload by suggestFor().
+const itemNames = (t) =>
+  ((DATA.items || {})[t] || []).map((it) => it.name).filter(Boolean);
+const mcpNames = () => ((DATA.mcp || {}).servers || []).map((sv) => sv.name);
+const LIVE_SUGGEST = {
+  "outputStyle": () => itemNames("output-styles"),
+  "skillOverrides:key": () => itemNames("skills"),
+  "mcpServerTimeouts:key": mcpNames,
+  "enabledMcpjsonServers": mcpNames,
+  "disabledMcpjsonServers": mcpNames,
+};
+function suggestFor(key, base) {
+  const out = (base || []).map(String);
+  const live = ((DATA.suggest || {})[key] || [])
+    .concat(LIVE_SUGGEST[key] ? LIVE_SUGGEST[key]() : []);
+  for (const v of live) if (!out.includes(String(v))) out.push(String(v));
+  return out;
 }
 
 // A single scalar control (used standalone and inside object/map forms).
@@ -314,11 +326,15 @@ function scalarControl(f, value, ph) {
     return { node: sel, collect: () => sel.value === "" ? undefined : sel.value };
   }
   const inp = document.createElement("input");
-  inp.type = f.type === "number" ? "number" : "text";
-  if (value !== undefined && value !== null) inp.value = String(value);
+  const sugg = suggestFor(f.key, f.values);
+  // datalist on type=number is ignored by Safari/Firefox, so suggested
+  // numbers use a text input; collect() still validates numerically
+  inp.type = f.type === "number" && !sugg.length ? "number" : "text";
+  if (f.type === "number") inp.inputMode = "decimal";
+  if (value === "") inp.value = '""';
+  else if (value !== undefined && value !== null) inp.value = String(value);
   if (ph) inp.placeholder = ph;
   let aux = null;
-  const sugg = f.type === "combo" ? comboSuggest(f) : [];
   if (sugg.length) { aux = datalist(sugg); inp.setAttribute("list", aux.id); }
   const collect = () => {
     const r = inp.value.trim();
@@ -328,7 +344,7 @@ function scalarControl(f, value, ph) {
       if (Number.isNaN(n)) throw new Error((f.key || "value") + ": not a number");
       return n;
     }
-    return r;
+    return r === '""' ? "" : r;
   };
   return { node: inp, aux, collect };
 }
@@ -338,7 +354,8 @@ function listForm(ctrl, s, cur) {
   const box = document.createElement("div");
   box.className = "formrows";
   ctrl.appendChild(box);
-  const dl = (s.item_values || []).length ? datalist(s.item_values) : null;
+  const sugg = suggestFor(s.key, s.item_values);
+  const dl = sugg.length ? datalist(sugg) : null;
   if (dl) ctrl.appendChild(dl);
   const addRow = (val) => {
     const r = document.createElement("div");
@@ -364,12 +381,16 @@ function mapForm(ctrl, s, cur) {
   const box = document.createElement("div");
   box.className = "formrows";
   ctrl.appendChild(box);
+  const ksugg = suggestFor(s.key + ":key", s.key_values);
+  const kdl = ksugg.length ? datalist(ksugg) : null;
+  if (kdl) ctrl.appendChild(kdl);
   const addRow = (k, v) => {
     const r = document.createElement("div");
     r.className = "formrow";
     const kin = document.createElement("input");
     kin.type = "text"; kin.className = "kk"; kin.placeholder = "key";
     kin.value = k || "";
+    if (kdl) kin.setAttribute("list", kdl.id);
     const val = scalarControl(
       s.values ? { type: "enum", values: s.values }
         : s.value_type === "number" ? { type: "number" } : { type: "string" },
@@ -418,7 +439,8 @@ function objectForm(ctrl, s, cur) {
     lab.className = "flabel";
     lab.textContent = f.key + (f.desc ? " — " + f.desc : "");
     line.appendChild(lab);
-    const sc = scalarControl(f, obj[f.key]);
+    // dotted path so subfields resolve live/server suggestions by full key
+    const sc = scalarControl({ ...f, key: s.key + "." + f.key }, obj[f.key]);
     line.appendChild(sc.node);
     if (sc.aux) line.appendChild(sc.aux);
     box.appendChild(line);
@@ -442,7 +464,27 @@ function jsonForm(ctrl, s, cur, isSet) {
   ta.placeholder = "JSON";
   const text = isSet ? JSON.stringify(cur, null, 2) : "";
   ta.value = text;
-  ta.rows = Math.min(12, Math.max(2, text.split("\n").length));
+  const fit = () => { ta.rows = Math.min(12, Math.max(2, ta.value.split("\n").length)); };
+  fit();
+  if ((s.templates || []).length) {
+    const sel = document.createElement("select");
+    const ph = opt("", "insert template…");
+    ph.disabled = true;
+    sel.append(ph, ...s.templates.map((t, i) => opt(String(i), t.name)));
+    sel.value = "";
+    sel.onchange = async () => {
+      const t = s.templates[Number(sel.value)];
+      sel.value = "";
+      if (!t) return;
+      if (ta.value.trim() && !(await mconfirm("replace " + s.key,
+          "replace the editor contents with the '" + t.name + "' template?",
+          "replace")))
+        return;
+      ta.value = JSON.stringify(t.value, null, 2);
+      fit();
+    };
+    ctrl.appendChild(sel);
+  }
   ctrl.appendChild(ta);
   return () => {
     const r = ta.value.trim();

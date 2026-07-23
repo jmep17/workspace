@@ -13,7 +13,8 @@ import webbrowser
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import config_files_state, item_read, item_save, scan_items, set_enabled
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
-from .settings import SETTINGS_SCHEMA, file_read, file_save, hook_test, settings_set, settings_state
+from .settings import (SETTINGS_SCHEMA, file_read, file_save, hook_test,
+                       settings_set, settings_state, suggest_state)
 from .statusline import statusline_save, statusline_state
 from .setup import setup_apply, setup_remove, setup_state
 from .insight import cost_stats, insight_budget, usage_stats
@@ -83,6 +84,7 @@ class Handler(BaseHTTPRequestHandler):
                 "items": {t: scan_items(t) for t in ITEM_TYPES},
                 "config_files": config_files_state(),
                 "settings": settings_state(),
+                "suggest": suggest_state(),
                 "mcp": mcp_state(),
                 "statusline": statusline_state(),
                 "config_dir": tilde(config_dir()),
