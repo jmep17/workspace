@@ -14,7 +14,8 @@ from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import config_files_state, item_read, item_save, scan_items, set_enabled
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from .settings import (SETTINGS_SCHEMA, file_read, file_save, hook_test,
-                       settings_set, settings_state, suggest_state)
+                       settings_set, settings_state, start_model_fetch,
+                       suggest_state)
 from .statusline import statusline_save, statusline_state
 from .setup import setup_apply, setup_remove, setup_state
 from .insight import cost_stats, insight_budget, usage_stats
@@ -200,6 +201,7 @@ def main():
         print(f"claude-ui: port {args.port} in use, using {port}")
     url = f"http://127.0.0.1:{port}"
     print(f"claude-ui: {url}  (config dir: {config_dir()})")
+    start_model_fetch()
     if not args.no_open:
         webbrowser.open(url)
     try:
